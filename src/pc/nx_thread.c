@@ -46,3 +46,32 @@ void nx_register_exit_hook(void (*callback)(void)) {
     sExitCallback = callback;
     appletHook(&sAppletHookCookie, nx_applet_hook, NULL);
 }
+
+// Copies the nickname of the Switch profile that launched the app into out
+// (NUL-terminated, up to outLen bytes). Returns 1 on success, 0 on any
+// failure (in which case out is left untouched). Homebrew launched via
+// title-override inherits the host game's preselected user, so the account
+// service can resolve which profile is playing.
+int nx_get_profile_nickname(char* out, unsigned int outLen) {
+    if (out == NULL || outLen == 0) { return 0; }
+    if (R_FAILED(accountInitialize(AccountServiceType_Application))) { return 0; }
+
+    int ok = 0;
+    AccountUid uid = {0};
+    if (R_SUCCEEDED(accountGetPreselectedUser(&uid))) {
+        AccountProfile profile;
+        if (R_SUCCEEDED(accountGetProfile(&profile, uid))) {
+            AccountProfileBase base = {0};
+            if (R_SUCCEEDED(accountProfileGet(&profile, NULL, &base)) && base.nickname[0]) {
+                // base.nickname is a fixed 0x20 buffer, NUL-terminated
+                unsigned int i = 0;
+                for (; i + 1 < outLen && base.nickname[i]; i++) { out[i] = base.nickname[i]; }
+                out[i] = '\0';
+                ok = 1;
+            }
+            accountProfileClose(&profile);
+        }
+    }
+    accountExit();
+    return ok;
+}

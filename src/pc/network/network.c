@@ -889,21 +889,30 @@ void network_shutdown(bool sendLeaving, bool exiting, bool popup, bool reconnect
 // exposes a plain-C-typed (bool/int/u8/u16/u32/s32, never u64/s64) boundary
 // that this file calls into instead.
 
-// trivial stubs (no libnx calls, so no conflict touching these here)
+// implemented in socket_ldn.c (isolated from this project's u64/s64 types).
+// Peer addresses are opaque void* pointing at a struct in_addr on the other
+// side of the boundary; this file only passes them around, never derefs them.
+bool ldn_initialize_impl(bool isServer);
+void ldn_update_impl(void);
+int ldn_send_impl(u8 localIndex, void* addr, u8* data, u16 dataLength);
+void ldn_shutdown_impl(void);
+void* ldn_dup_addr_impl(u8 localIndex);
+bool ldn_match_addr_impl(void* addr1, void* addr2);
+void ldn_save_id_impl(u8 localIndex);
+void ldn_clear_id_impl(u8 localIndex);
+
 static s64 ldn_get_id(UNUSED u8 localIndex) { return 0; }
 static char* ldn_get_id_str(UNUSED u8 localIndex) { return "ldn"; }
-static void ldn_save_id(UNUSED u8 localIndex, UNUSED s64 networkId) {}
-static void ldn_clear_id(UNUSED u8 localIndex) {}
-static void* ldn_dup_addr(UNUSED u8 localIndex) { return NULL; }
-static bool ldn_match_addr(UNUSED void* addr1, UNUSED void* addr2) { return false; }
 static void ldn_get_lobby_id(UNUSED char* destination, UNUSED u32 destLength) {}
 static void ldn_get_lobby_secret(UNUSED char* destination, UNUSED u32 destLength) {}
 
-// implemented in socket_ldn.c (isolated from this project's u64/s64 types)
-bool ldn_initialize_impl(bool isServer);
-void ldn_update_impl(void);
-int ldn_send_impl(u8* data, u16 dataLength);
-void ldn_shutdown_impl(void);
+// address tracking: forward to socket_ldn.c so the server can match incoming
+// packets to the right player. Without this every packet looked like it came
+// from an unknown player, so duplicate join requests spawned phantom players.
+static void ldn_save_id(u8 localIndex, UNUSED s64 networkId) { ldn_save_id_impl(localIndex); }
+static void ldn_clear_id(u8 localIndex) { ldn_clear_id_impl(localIndex); }
+static void* ldn_dup_addr(u8 localIndex) { return ldn_dup_addr_impl(localIndex); }
+static bool ldn_match_addr(void* addr1, void* addr2) { return ldn_match_addr_impl(addr1, addr2); }
 
 static bool ldn_initialize(enum NetworkType networkType, UNUSED bool reconnecting) {
     return ldn_initialize_impl(networkType == NT_SERVER);
@@ -913,8 +922,8 @@ static void ldn_update(void) {
     ldn_update_impl();
 }
 
-static int ldn_send(UNUSED u8 localIndex, UNUSED void* addr, u8* data, u16 dataLength) {
-    return ldn_send_impl(data, dataLength);
+static int ldn_send(u8 localIndex, void* addr, u8* data, u16 dataLength) {
+    return ldn_send_impl(localIndex, addr, data, dataLength);
 }
 
 static void ldn_shutdown(UNUSED bool reconnecting) {

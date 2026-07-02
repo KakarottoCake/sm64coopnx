@@ -843,6 +843,19 @@ NEXT_OPTION:
 
     if (gCLIOpts.playerName[0]) { snprintf(configPlayerName, MAX_CONFIG_STRING, "%s", gCLIOpts.playerName); }
 
+#ifdef __SWITCH__
+    // Default the player name to the Switch profile that launched the app.
+    // Only overrides an empty/never-set name so a name the user typed in the
+    // in-game menu is preserved across launches.
+    if (configPlayerName[0] == '\0' || strcmp(configPlayerName, "Player") == 0) {
+        extern int nx_get_profile_nickname(char* out, unsigned int outLen);
+        char nickname[MAX_CONFIG_STRING] = { 0 };
+        if (nx_get_profile_nickname(nickname, MAX_CONFIG_STRING) && nickname[0]) {
+            snprintf(configPlayerName, MAX_CONFIG_STRING, "%s", nickname);
+        }
+    }
+#endif
+
     if (!network_player_name_valid(configPlayerName)) {
         snprintf(configPlayerName, MAX_CONFIG_STRING, "Player");
     }

@@ -1,24 +1,43 @@
 #ifdef __SWITCH__
 
 // Isolated on purpose: this file includes ONLY <switch.h> (libnx) and
-// standard headers, never any project header. <switch.h>'s u64/s64
+// standard/socket headers, never any project header. <switch.h>'s u64/s64
 // typedefs (long) conflict with this project's own PR/ultratypes.h u64/s64
 // (long long) - same width, but C treats them as distinct types, so the
 // two cannot be included in the same translation unit. network.c's LDN
 // glue (struct NetworkSystem gNetworkSystemLdn, etc.) calls into the
 // plain-C-typed (bool/int/u8/u16/u32, never u64/s64) functions below
-// instead of touching libnx types directly.
+// instead of touching libnx types directly. Peer addresses cross that
+// boundary as opaque void* pointing at struct in_addr (a plain C socket
+// type, not a project or libnx type), so both sides can handle them.
 
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <switch.h>
 
-// matches network.h's PACKET_LENGTH; duplicated here rather than included,
-// to keep this file's only dependency on libnx headers
+// TRANSPORT: game packets travel as ordinary UDP datagrams over the LDN
+// network, NOT as ldn action frames. The LDN service assigns every joined
+// console a real IPv4 address (LdnNodeInfo.ip_addr - usable with standard
+// sockets), and the bsd socket service handles the data path in the kernel
+// the same way it does for real games. The earlier action-frame transport
+// was a dead end (per-packet IPC into the ldn sysmodule, silent multi-second
+// drops, 0x400 size limit, and hard console-freezing wedges), so ldn* calls
+// are now only used for creating/scanning/joining the network itself.
 #define LDN_PACKET_LENGTH 3000
-// matches network_player.h's UNKNOWN_LOCAL_INDEX
+// matches network_player.h's UNKNOWN_LOCAL_INDEX ((u8)-1)
 #define LDN_UNKNOWN_LOCAL_INDEX ((unsigned char)-1)
+// matches include/types.h's MAX_PLAYERS
+#define LDN_MAX_PLAYERS 16
+// UDP port for game traffic on the LDN network (mirrors the PC default port)
+#define LDN_UDP_PORT 7777
 
 extern void network_receive(unsigned char localIndex, void* addr, unsigned char* data, unsigned short dataLength);
 extern char configPlayerName[];
@@ -27,75 +46,35 @@ static bool sLdnInitialized = false;
 static bool sLdnAccessPointOpen = false;
 static bool sLdnStationOpen = false;
 static bool sLdnConnected = false;
-static bool sLdnActionFrameEnabled = false;
+static bool sIsServer = false;
 static LdnNetworkInfo sLdnNetworkInfo[4];
 static int sLdnNetworkCount = 0;
 
+// UDP transport + per-player address tracking. This mirrors socket.c's
+// sAddr[] model exactly: index 0 doubles as a scratch "address of the most
+// recently received packet" AND (on the client) the server's address;
+// indices 1..MAX-1 hold each connected player's bound address, set via
+// ldn_save_id_impl() when they join. Matching an incoming packet's source
+// address against this table is what lets the server tell which player sent
+// a packet - without it every packet looks like it's from an unknown player,
+// which made the server assign a fresh globalIndex to every (duplicated)
+// join request and produce phantom players.
+static int sUdpSocket = -1;
+static struct in_addr sOwnAddr;
+static struct in_addr sLdnAddr[LDN_MAX_PLAYERS];
+
+// periodic activity summary (see ldn_update_impl)
+static int sSendOkCount = 0;
+static int sSendFailCount = 0;
+static int sRecvOkCount = 0;
+static int sConnectedCount = 0;
+static u64 sLastHeartbeatTick = 0;
+
 void ldn_shutdown_impl(void);
-static void ldn_thread_start(void);
-static void ldn_thread_stop(void);
-
-// Every ldnSendActionFrame/ldnRecvActionFrame/ldnGetNetworkInfo call is a
-// kernel IPC round trip to the ldn sysmodule. Doing these directly from
-// ldn_update_impl()/ldn_send_impl() (called once per game frame, and once
-// per outgoing packet, from the main thread) meant every frame paid that
-// IPC latency before rendering could continue - this is what caused the
-// lag/desync once real gameplay traffic started flowing continuously.
-// Instead, a dedicated background thread owns all the actual radio I/O;
-// the main thread only ever touches small mutex-protected queues, which is
-// cheap. bit0=1 (non-blocking) is no longer needed for the recv call since
-// blocking here no longer stalls anything the player can see - but it's
-// kept anyway so the thread can still notice sLdnThreadShouldStop promptly
-// instead of being stuck inside a blocking syscall.
-// A burst right after connecting (radio-level retransmits of the same
-// action frame, or several frames' worth of already-queued gameplay traffic
-// arriving back to back) can hand the recv thread many packets within a
-// single frame's worth of time - a 64-slot queue overflowed within
-// milliseconds of connecting in testing, silently dropping the mod-list/join
-// handshake and leading to a spurious player-timeout disconnect shortly
-// after. 512 slots gives a lot more headroom to absorb a burst before the
-// main thread's once-per-frame drain catches up.
-#define LDN_QUEUE_CAPACITY 512
-// Matches LDN_ACTION_FRAME_MAX_SIZE below (real action frames can never
-// exceed this) - much smaller than LDN_PACKET_LENGTH, so bumping
-// LDN_QUEUE_CAPACITY way up here doesn't blow up memory usage.
-#define LDN_QUEUE_ITEM_MAX_SIZE 0x400
-
-typedef struct {
-    unsigned char data[LDN_QUEUE_ITEM_MAX_SIZE];
-    unsigned short length;
-} LdnQueueItem;
-
-static LdnQueueItem sRecvQueue[LDN_QUEUE_CAPACITY];
-static int sRecvHead = 0, sRecvTail = 0, sRecvCount = 0;
-static Mutex sRecvMutex;
-
-static LdnQueueItem sSendQueue[LDN_QUEUE_CAPACITY];
-static int sSendHead = 0, sSendTail = 0, sSendCount = 0;
-static Mutex sSendMutex;
-
-static Thread sLdnThread;
-static bool sLdnThreadRunning = false;
-static bool sLdnThreadShouldStop = false;
-
-// The ldn sysmodule's IPC session isn't safe for concurrent calls from two
-// threads - the background thread (send/recv/getNetworkInfo) and the main
-// thread (scan/connect/initialize/shutdown, e.g. the browser panel still
-// polling ldn_refresh_scan right after a connect) racing on the same session
-// crashed the sysmodule itself (Atmosphere fatal report, Process Name "ldn").
-// Every actual ldn* call, on either thread, must hold this while calling.
-static Mutex sLdnIpcMutex;
 
 static void ldn_log(const char* fmt, ...) {
-    // Per-packet send/recv tracing floods this once real gameplay traffic
-    // starts (every frame, x2 for the per-node send loop) - each call is a
-    // full SD-card file open/write/close, enough sustained I/O to freeze
-    // the game. Cap it: plenty to capture the connect handshake, cuts off
-    // before steady-state traffic dominates.
     static int sCallsRemaining = 2000;
     if (sCallsRemaining <= 0) { return; }
-    // truncate on this process's first write so stale data from a previous
-    // launch doesn't eat into this run's budget before real data appears
     static bool sOpened = false;
     FILE* f = fopen("sdmc:/sm64coopdx_ldn.log", sOpened ? "a" : "w");
     sOpened = true;
@@ -110,75 +89,132 @@ static void ldn_log(const char* fmt, ...) {
     fclose(f);
 }
 
+// The libnx header notes LdnIpv4Address is "essentially the same as struct
+// in_addr ... (byteswap required)" - it stores the address in the opposite
+// byte order from the network order sockets expect.
+static struct in_addr ldn_to_in_addr(LdnIpv4Address ldnAddr) {
+    struct in_addr a;
+    a.s_addr = __builtin_bswap32(ldnAddr.addr);
+    return a;
+}
+
+// Re-reads the node list from the ldn service. Used to (a) log how many
+// nodes are connected, and (b) on the client, learn the host's (AccessPoint
+// node[0]) address so we know where to send. Directed per-player addressing
+// otherwise comes from sLdnAddr[] (learned as packets arrive), not from here.
+static void ldn_refresh_nodes(void) {
+    LdnNetworkInfo netInfo;
+    Result rc = ldnGetNetworkInfo(&netInfo);
+    if (R_FAILED(rc)) {
+        ldn_log("[LDN] ldn_refresh_nodes: ldnGetNetworkInfo FAILED 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
+        return;
+    }
+
+    int connectedCount = 0;
+    for (s32 i = 0; i < netInfo.node_count && i < 8; i++) {
+        if (netInfo.nodes[i].is_connected) { connectedCount++; }
+    }
+    if (connectedCount != sConnectedCount) {
+        ldn_log("[LDN] ldn_refresh_nodes: connected node count %d -> %d", sConnectedCount, connectedCount);
+        sConnectedCount = connectedCount;
+    }
+
+    // node[0] is always the AccessPoint (host). On the client, that's the
+    // server we send to - bind it to index 0.
+    if (!sIsServer && netInfo.node_count >= 1 && netInfo.nodes[0].is_connected) {
+        sLdnAddr[0] = ldn_to_in_addr(netInfo.nodes[0].ip_addr);
+    }
+}
+
+static bool ldn_udp_open(void) {
+    static bool sSocketServiceUp = false;
+    if (!sSocketServiceUp) {
+        Result rc = socketInitializeDefault();
+        ldn_log("[LDN] socketInitializeDefault: 0x%x", rc);
+        if (R_FAILED(rc)) { return false; }
+        sSocketServiceUp = true;
+    }
+
+    LdnIpv4Address ownLdnAddr;
+    LdnSubnetMask mask;
+    Result rc = ldnGetIpv4Address(&ownLdnAddr, &mask);
+    if (R_FAILED(rc)) {
+        ldn_log("[LDN] ldnGetIpv4Address FAILED 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
+        return false;
+    }
+    sOwnAddr = ldn_to_in_addr(ownLdnAddr);
+    unsigned int ip = sOwnAddr.s_addr;
+    ldn_log("[LDN] own ip: %u.%u.%u.%u",
+            ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+
+    sUdpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sUdpSocket < 0) {
+        ldn_log("[LDN] socket() failed: errno=%d", errno);
+        return false;
+    }
+
+    int flags = fcntl(sUdpSocket, F_GETFL, 0);
+    fcntl(sUdpSocket, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in bindAddr;
+    memset(&bindAddr, 0, sizeof(bindAddr));
+    bindAddr.sin_family = AF_INET;
+    bindAddr.sin_port = htons(LDN_UDP_PORT);
+    bindAddr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(sUdpSocket, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
+        ldn_log("[LDN] bind() failed: errno=%d", errno);
+        close(sUdpSocket);
+        sUdpSocket = -1;
+        return false;
+    }
+
+    memset(sLdnAddr, 0, sizeof(sLdnAddr));
+    sConnectedCount = 0;
+    ldn_refresh_nodes();
+    sLastHeartbeatTick = svcGetSystemTick();
+    sSendOkCount = sSendFailCount = sRecvOkCount = 0;
+    ldn_log("[LDN] udp transport up on port %d (role=%s)", LDN_UDP_PORT, sIsServer ? "host" : "client");
+    return true;
+}
+
+static void ldn_udp_close(void) {
+    if (sUdpSocket >= 0) {
+        close(sUdpSocket);
+        sUdpSocket = -1;
+    }
+    memset(sLdnAddr, 0, sizeof(sLdnAddr));
+}
+
 bool ldn_initialize_impl(bool isServer) {
     ldn_log("[LDN] ldn_initialize_impl: isServer=%d initialized=%d connected=%d stationOpen=%d",
             isServer, sLdnInitialized, sLdnConnected, sLdnStationOpen);
 
     if (sLdnInitialized && sLdnConnected) { return true; }
+    sIsServer = isServer;
 
-    // Switching roles (e.g. tried to Join, then went back and pressed Host,
-    // or vice versa) without a clean shutdown in between leaves us in the
-    // wrong open state for ldnOpenAccessPoint()/ldnOpenStation() to succeed.
-    // Only reset when the role actually mismatches the currently-open state -
-    // NOT just because a station happens to already be open, since that's
-    // the normal, correct state when re-entering this function as a client
-    // (e.g. network_init(NT_CLIENT,...) called right after a scan already
-    // opened it) and resetting here would wipe the scan results out from
-    // under the caller.
+    // Switching roles without a clean shutdown leaves us in the wrong open
+    // state; only reset on an actual role mismatch (not just because a
+    // station is already open, which is the normal client re-entry state).
     if (sLdnInitialized && ((isServer && sLdnStationOpen) || (!isServer && sLdnAccessPointOpen))) {
         ldn_log("[LDN] ldn_initialize_impl: stale role state, resetting first");
         ldn_shutdown_impl();
     }
 
     if (!sLdnInitialized) {
-        // If a previous run of this app was killed abruptly (title-override
-        // relaunch, HOME-closed without reaching game_exit()'s SDL_QUIT ->
-        // network_shutdown() path), the ldn sysmodule's own access-point
-        // state can still be winding down even though the kernel already
-        // closed our old session's handles. ldnInitialize can transiently
-        // fail while that happens - retry briefly instead of giving up
-        // immediately.
         Result rc;
         for (int attempt = 0; attempt < 5; attempt++) {
-            mutexLock(&sLdnIpcMutex);
             rc = ldnInitialize(LdnServiceType_User);
-            mutexUnlock(&sLdnIpcMutex);
             ldn_log("[LDN] ldnInitialize attempt=%d: 0x%x (mod=%04x desc=%04x)", attempt, rc, R_MODULE(rc), R_DESCRIPTION(rc));
             if (R_SUCCEEDED(rc)) { break; }
             svcSleepThread(300000000ULL); // 300ms
         }
         if (R_FAILED(rc)) { return false; }
         sLdnInitialized = true;
-
-        // ldnSendActionFrame/ldnRecvActionFrame (how actual game packets are
-        // exchanged once connected) silently do nothing useful without this
-        // being enabled first - it must happen here, while still in
-        // LdnState_Initialized, before OpenAccessPoint/OpenStation. Missing
-        // this was why the radio-level connect could succeed (ldnConnect
-        // returning 0x0) while the client sat on "Joining..." forever: the
-        // TCP/game-data channel was never actually active.
-        LdnActionFrameSettings afSettings;
-        memset(&afSettings, 0, sizeof(afSettings));
-        afSettings.local_communication_id = -1;
-        afSettings.security_mode = (u16)LdnSecurityMode_Product;
-        afSettings.passphrase_size = 0x10;
-        memset(afSettings.passphrase, 0x42, 0x10);
-        mutexLock(&sLdnIpcMutex);
-        Result afRc = ldnEnableActionFrame(&afSettings);
-        mutexUnlock(&sLdnIpcMutex);
-        ldn_log("[LDN] ldnEnableActionFrame: 0x%x (mod=%04x desc=%04x)", afRc, R_MODULE(afRc), R_DESCRIPTION(afRc));
-        sLdnActionFrameEnabled = R_SUCCEEDED(afRc);
     }
 
     if (isServer) {
-        // ldnCreateNetwork requires LdnState_AccessPoint, which is only
-        // reached via ldnOpenAccessPoint() - calling it straight after
-        // ldnInitialize() (still LdnState_Initialized) fails with
-        // "Invalid State or state field" (module 203/ldn, description 39).
         if (!sLdnAccessPointOpen) {
-            mutexLock(&sLdnIpcMutex);
             Result rc = ldnOpenAccessPoint();
-            mutexUnlock(&sLdnIpcMutex);
             ldn_log("[LDN] ldnOpenAccessPoint: 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
             if (R_FAILED(rc)) { return false; }
             sLdnAccessPointOpen = true;
@@ -200,28 +236,23 @@ bool ldn_initialize_impl(bool isServer) {
         cfg.channel = 0;
         cfg.node_count_max = 4;
 
-        mutexLock(&sLdnIpcMutex);
         Result rc = ldnCreateNetwork(&sec, &user, &cfg);
-        mutexUnlock(&sLdnIpcMutex);
         ldn_log("[LDN] ldnCreateNetwork: 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
         if (R_FAILED(rc)) {
-            // roll back to LdnState_Initialized so a retry starts clean
-            mutexLock(&sLdnIpcMutex);
             ldnCloseAccessPoint();
-            mutexUnlock(&sLdnIpcMutex);
             sLdnAccessPointOpen = false;
             return false;
         }
 
         sLdnConnected = true;
-        mutexLock(&sLdnIpcMutex);
         ldnSetStationAcceptPolicy(LdnAcceptPolicy_AlwaysAccept);
-        mutexUnlock(&sLdnIpcMutex);
-        ldn_thread_start();
+        if (!ldn_udp_open()) {
+            ldn_log("[LDN] ldn_initialize_impl: udp transport failed to open");
+            ldn_shutdown_impl();
+            return false;
+        }
     } else if (!sLdnStationOpen) {
-        mutexLock(&sLdnIpcMutex);
         Result rc = ldnOpenStation();
-        mutexUnlock(&sLdnIpcMutex);
         ldn_log("[LDN] ldnOpenStation: 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
         if (R_FAILED(rc)) { return false; }
         sLdnStationOpen = true;
@@ -230,235 +261,109 @@ bool ldn_initialize_impl(bool isServer) {
     return true;
 }
 
-// The related lp2p service's equivalent send command documents a 0x400
-// (1024 byte) max action frame size. Sending an oversized frame previously
-// crashed the "ldn" sysmodule itself (Data Abort, confirmed via an
-// Atmosphere crash report naming process "ldn" as the crashed process) -
-// this is a hard safety net so no caller can ever repeat that, regardless
-// of how the data got this large.
-#define LDN_ACTION_FRAME_MAX_SIZE 0x400
-
-// Tracks the last seen connected-node count so a change (radio-level link
-// loss, detected by the ldn sysmodule itself) gets logged once instead of
-// either flooding the log or being invisible - the player-timeout kick in
-// network_player.c only logs the eventual symptom (~15-22s later), not
-// whether the underlying radio link was still up at the time.
-static int sLastConnectedCount = -1;
-
-// A player-timeout kick (network_player.c) only reveals that data stopped
-// arriving ~15-22s after the fact, not whether ldnSendActionFrame/
-// ldnRecvActionFrame were themselves still succeeding during that window.
-// These counters + a periodic heartbeat let us tell apart "the sysmodule
-// stopped accepting our IPC calls" from "the IPC calls kept succeeding but
-// the other console just never got the radio frames" (the latter would mean
-// a real hardware-level drop, not a bug here).
-static int sSendOkCount = 0;
-static int sSendFailCount = 0;
-static int sRecvOkCount = 0;
-
-// Runs on the dedicated LDN thread only. Does the actual ldnGetNetworkInfo +
-// per-node ldnSendActionFrame IPC calls for one queued packet.
-static void ldn_thread_do_send(unsigned char* data, unsigned short dataLength) {
-    LdnNetworkInfo netInfo;
-    mutexLock(&sLdnIpcMutex);
-    Result infoRc = ldnGetNetworkInfo(&netInfo);
-    mutexUnlock(&sLdnIpcMutex);
-    if (R_FAILED(infoRc)) {
-        ldn_log("[LDN] ldn_thread_do_send: ldnGetNetworkInfo FAILED 0x%x (mod=%04x desc=%04x)", infoRc, R_MODULE(infoRc), R_DESCRIPTION(infoRc));
-        return;
-    }
-
-    int connectedCount = 0;
-    for (s32 i = 0; i < netInfo.node_count; i++) {
-        if (netInfo.nodes[i].is_connected) { connectedCount++; }
-    }
-    if (connectedCount != sLastConnectedCount) {
-        ldn_log("[LDN] ldn_thread_do_send: connected node count changed %d -> %d (node_count=%d)", sLastConnectedCount, connectedCount, netInfo.node_count);
-        sLastConnectedCount = connectedCount;
-    }
-
-    int sentTo = 0;
-    for (s32 i = 0; i < netInfo.node_count; i++) {
-        if (netInfo.nodes[i].is_connected) {
-            // channel MUST be the network's actual operating channel (from
-            // ldnGetNetworkInfo, NOT a hardcoded value) - action frames sent
-            // on the wrong channel are silently never seen by the other side.
-            // flags=0 (blocking) is fine now - this runs on the LDN thread,
-            // not the main thread, so blocking here no longer stalls frames.
-            mutexLock(&sLdnIpcMutex);
-            Result sendRc = ldnSendActionFrame(data, dataLength, netInfo.nodes[i].mac_addr, netInfo.common.bssid, netInfo.common.channel, 0);
-            mutexUnlock(&sLdnIpcMutex);
-            if (R_FAILED(sendRc)) {
-                ldn_log("[LDN] ldn_thread_do_send: ldnSendActionFrame to node[%d] FAILED 0x%x (mod=%04x desc=%04x)", i, sendRc, R_MODULE(sendRc), R_DESCRIPTION(sendRc));
-                sSendFailCount++;
-            } else {
-                sSendOkCount++;
-            }
-            sentTo++;
-        }
-    }
-    if (sentTo == 0) {
-        ldn_log("[LDN] ldn_thread_do_send: WARNING - no connected nodes to send to! node_count=%d", netInfo.node_count);
-    }
-}
-
-static void ldn_thread_func(void* arg) {
-    (void)arg;
-    ldn_log("[LDN] ldn_thread_func: started");
-    sSendOkCount = 0;
-    sSendFailCount = 0;
-    sRecvOkCount = 0;
-    u64 lastHeartbeatTick = svcGetSystemTick();
-    while (!sLdnThreadShouldStop) {
-        // every ~2s, log a summary of actual IPC-level send/recv activity -
-        // low enough volume to stay within the log budget for a long
-        // session, but frequent enough to pinpoint exactly when real IPC
-        // traffic stops (vs. keeps succeeding while the other side just
-        // never receives it - a real radio-level drop, not a code bug)
-        u64 nowTick = svcGetSystemTick();
-        if ((nowTick - lastHeartbeatTick) >= (armGetSystemTickFreq() * 2)) {
-            ldn_log("[LDN] heartbeat: sendOk=%d sendFail=%d recvOk=%d", sSendOkCount, sSendFailCount, sRecvOkCount);
-            sSendOkCount = 0;
-            sSendFailCount = 0;
-            sRecvOkCount = 0;
-            lastHeartbeatTick = nowTick;
-        }
-        // drain the whole send queue first (each item is a quick IPC call)
-        for (;;) {
-            if (sLdnThreadShouldStop) { break; }
-            LdnQueueItem item;
-            bool has = false;
-            mutexLock(&sSendMutex);
-            if (sSendCount > 0) {
-                item = sSendQueue[sSendHead];
-                sSendHead = (sSendHead + 1) % LDN_QUEUE_CAPACITY;
-                sSendCount--;
-                has = true;
-            }
-            mutexUnlock(&sSendMutex);
-            if (!has) { break; }
-            ldn_thread_do_send(item.data, item.length);
-        }
-
-        // one non-blocking receive attempt per loop iteration, then a short
-        // sleep - avoids a tight busy-spin while still checking often enough
-        // (this thread is off the render path, so this delay doesn't cost
-        // any visible frame time)
-        unsigned char recvBuf[LDN_PACKET_LENGTH];
-        LdnMacAddress addr0, addr1;
-        s16 channel;
-        u32 outSize;
-        s32 linkLevel;
-        mutexLock(&sLdnIpcMutex);
-        Result rc = ldnRecvActionFrame(recvBuf, sizeof(recvBuf), &addr0, &addr1, &channel, &outSize, &linkLevel, 1);
-        mutexUnlock(&sLdnIpcMutex);
-        if (R_SUCCEEDED(rc) && outSize > 0 && outSize <= LDN_QUEUE_ITEM_MAX_SIZE && channel > 0) {
-            sRecvOkCount++;
-            mutexLock(&sRecvMutex);
-            if (sRecvCount < LDN_QUEUE_CAPACITY) {
-                LdnQueueItem* slot = &sRecvQueue[sRecvTail];
-                memcpy(slot->data, recvBuf, outSize);
-                slot->length = (unsigned short)outSize;
-                sRecvTail = (sRecvTail + 1) % LDN_QUEUE_CAPACITY;
-                sRecvCount++;
-            } else {
-                ldn_log("[LDN] ldn_thread_func: recv queue full, dropping packet");
-            }
-            mutexUnlock(&sRecvMutex);
-        } else {
-            svcSleepThread(1000000ULL); // 1ms
-        }
-    }
-    ldn_log("[LDN] ldn_thread_func: stopped");
-}
-
-static void ldn_thread_start(void) {
-    if (sLdnThreadRunning) { return; }
-    sLdnThreadShouldStop = false;
-    mutexInit(&sRecvMutex);
-    mutexInit(&sSendMutex);
-    sRecvHead = sRecvTail = sRecvCount = 0;
-    sSendHead = sSendTail = sSendCount = 0;
-    sLastConnectedCount = -1;
-    Result rc = threadCreate(&sLdnThread, ldn_thread_func, NULL, NULL, 32 * 1024, 0x2C, -2);
-    if (R_FAILED(rc)) {
-        ldn_log("[LDN] ldn_thread_start: threadCreate FAILED 0x%x", rc);
-        return;
-    }
-    threadStart(&sLdnThread);
-    sLdnThreadRunning = true;
-}
-
-static void ldn_thread_stop(void) {
-    if (!sLdnThreadRunning) { return; }
-    sLdnThreadShouldStop = true;
-    threadWaitForExit(&sLdnThread);
-    threadClose(&sLdnThread);
-    sLdnThreadRunning = false;
-}
-
 void ldn_update_impl(void) {
-    if (!sLdnInitialized || !sLdnConnected) { return; }
+    if (!sLdnInitialized || !sLdnConnected || sUdpSocket < 0) { return; }
 
-    // drain whatever the background thread has received since last frame -
-    // network_receive() touches game state, so it must run on the main
-    // thread, but the actual radio recv IPC already happened off-thread.
+    u64 nowTick = svcGetSystemTick();
+    u64 tickFreq = armGetSystemTickFreq();
+
+    if ((nowTick - sLastHeartbeatTick) >= (tickFreq * 2)) {
+        ldn_refresh_nodes(); // pick up joins/leaves + client's server addr
+        ldn_log("[LDN] heartbeat: sendOk=%d sendFail=%d recvOk=%d connected=%d", sSendOkCount, sSendFailCount, sRecvOkCount, sConnectedCount);
+        sSendOkCount = sSendFailCount = sRecvOkCount = 0;
+        sLastHeartbeatTick = nowTick;
+    }
+
+    // drain everything that's arrived since last frame (non-blocking)
+    unsigned char recvBuf[LDN_PACKET_LENGTH];
     for (;;) {
-        LdnQueueItem item;
-        bool has = false;
-        mutexLock(&sRecvMutex);
-        if (sRecvCount > 0) {
-            item = sRecvQueue[sRecvHead];
-            sRecvHead = (sRecvHead + 1) % LDN_QUEUE_CAPACITY;
-            sRecvCount--;
-            has = true;
+        struct sockaddr_in from;
+        socklen_t fromLen = sizeof(from);
+        ssize_t len = recvfrom(sUdpSocket, recvBuf, sizeof(recvBuf), 0, (struct sockaddr*)&from, &fromLen);
+        if (len <= 0) { break; }
+        sRecvOkCount++;
+
+        // stash the sender in scratch index 0, then match it against the
+        // bound player addresses so the server knows which player this is
+        // (exactly how socket.c's socket_receive assigns localIndex).
+        sLdnAddr[0] = from.sin_addr;
+        unsigned char localIndex = LDN_UNKNOWN_LOCAL_INDEX;
+        for (int i = 1; i < LDN_MAX_PLAYERS; i++) {
+            if (sLdnAddr[i].s_addr != 0 && sLdnAddr[i].s_addr == from.sin_addr.s_addr) {
+                localIndex = (unsigned char)i;
+                break;
+            }
         }
-        mutexUnlock(&sRecvMutex);
-        if (!has) { break; }
-        network_receive(LDN_UNKNOWN_LOCAL_INDEX, NULL, item.data, item.length);
+        network_receive(localIndex, &sLdnAddr[0], recvBuf, (unsigned short)len);
     }
 }
 
-int ldn_send_impl(unsigned char* data, unsigned short dataLength) {
-    if (!sLdnInitialized || !sLdnConnected) {
+// Sends one packet to a specific player. Mirrors socket.c's ns_socket_send:
+// normally the destination is the bound address for localIndex, except
+// localIndex 0 with an explicit address (the reply-to-sender convention)
+// sends to that address instead.
+int ldn_send_impl(unsigned char localIndex, void* address, unsigned char* data, unsigned short dataLength) {
+    if (!sLdnInitialized || !sLdnConnected || sUdpSocket < 0) { return -1; }
+    if (localIndex >= LDN_MAX_PLAYERS) { return -1; }
+
+    struct in_addr dest = sLdnAddr[localIndex];
+    if (localIndex == 0 && address != NULL) {
+        dest = *(struct in_addr*)address;
+    }
+    if (dest.s_addr == 0) {
+        // no known address for this target yet - nothing to send to
         return -1;
     }
 
-    if (dataLength > LDN_ACTION_FRAME_MAX_SIZE) {
-        ldn_log("[LDN] ldn_send_impl: REFUSING oversized payload dataLength=%d (max=%d) - this previously crashed the ldn sysmodule", dataLength, LDN_ACTION_FRAME_MAX_SIZE);
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(LDN_UDP_PORT);
+    to.sin_addr = dest;
+
+    ssize_t sent = sendto(sUdpSocket, data, dataLength, 0, (struct sockaddr*)&to, sizeof(to));
+    if (sent < 0) {
+        sSendFailCount++;
         return -1;
     }
-
-    // just hand it to the LDN thread - the actual IPC calls happen there
-    mutexLock(&sSendMutex);
-    bool queued = false;
-    if (sSendCount < LDN_QUEUE_CAPACITY) {
-        LdnQueueItem* slot = &sSendQueue[sSendTail];
-        memcpy(slot->data, data, dataLength);
-        slot->length = dataLength;
-        sSendTail = (sSendTail + 1) % LDN_QUEUE_CAPACITY;
-        sSendCount++;
-        queued = true;
-    }
-    mutexUnlock(&sSendMutex);
-
-    if (!queued) {
-        ldn_log("[LDN] ldn_send_impl: send queue full, dropping packet");
-        return -1;
-    }
+    sSendOkCount++;
     return dataLength;
+}
+
+// --- per-player address glue, called from network.c's NetworkSystem ---
+
+void* ldn_dup_addr_impl(unsigned char localIndex) {
+    if (localIndex >= LDN_MAX_PLAYERS) { localIndex = 0; }
+    struct in_addr* copy = malloc(sizeof(struct in_addr));
+    if (copy) { *copy = sLdnAddr[localIndex]; }
+    return copy;
+}
+
+bool ldn_match_addr_impl(void* a, void* b) {
+    if (a == NULL || b == NULL) { return false; }
+    return ((struct in_addr*)a)->s_addr == ((struct in_addr*)b)->s_addr;
+}
+
+// bind the current sender (scratch index 0) to a player slot on join
+void ldn_save_id_impl(unsigned char localIndex) {
+    if (localIndex == 0 || localIndex >= LDN_MAX_PLAYERS) { return; }
+    sLdnAddr[localIndex] = sLdnAddr[0];
+    unsigned int ip = sLdnAddr[localIndex].s_addr;
+    ldn_log("[LDN] bound player %d to %u.%u.%u.%u", localIndex,
+            ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+}
+
+void ldn_clear_id_impl(unsigned char localIndex) {
+    if (localIndex == 0 || localIndex >= LDN_MAX_PLAYERS) { return; }
+    sLdnAddr[localIndex].s_addr = 0;
 }
 
 void ldn_shutdown_impl(void) {
     ldn_log("[LDN] ldn_shutdown_impl: initialized=%d connected=%d stationOpen=%d accessPointOpen=%d",
             sLdnInitialized, sLdnConnected, sLdnStationOpen, sLdnAccessPointOpen);
-    // stop touching the ldn service from the background thread before we
-    // start tearing the session down on this one, or the two threads could
-    // race on the same session state
-    ldn_thread_stop();
+    ldn_udp_close();
     if (!sLdnInitialized) { return; }
 
-    mutexLock(&sLdnIpcMutex);
     if (sLdnConnected) {
         ldnDisconnect();
         sLdnConnected = false;
@@ -472,12 +377,7 @@ void ldn_shutdown_impl(void) {
         ldnCloseAccessPoint();
         sLdnAccessPointOpen = false;
     }
-    if (sLdnActionFrameEnabled) {
-        ldnDisableActionFrame();
-        sLdnActionFrameEnabled = false;
-    }
     ldnExit();
-    mutexUnlock(&sLdnIpcMutex);
     sLdnInitialized = false;
     sLdnNetworkCount = 0;
 }
@@ -488,21 +388,16 @@ bool ldn_connect_to_index(int index) {
 
     if (index < 0 || index >= sLdnNetworkCount) { return false; }
 
-    // If a previous attempt on this process left us in AccessPoint state
-    // (e.g. switched from hosting to joining without a clean shutdown),
-    // ldnOpenStation() below would fail with Invalid State. Reset to a known
-    // clean state first.
     if (sLdnAccessPointOpen) {
         ldn_log("[LDN] ldn_connect_to_index: was in AccessPoint state, resetting first");
         ldn_shutdown_impl();
     }
 
+    sIsServer = false;
     if (!sLdnInitialized) {
         if (!ldn_initialize_impl(false)) { return false; }
     } else if (!sLdnStationOpen) {
-        mutexLock(&sLdnIpcMutex);
         Result rc = ldnOpenStation();
-        mutexUnlock(&sLdnIpcMutex);
         ldn_log("[LDN] ldnOpenStation (reopen): 0x%x", rc);
         if (R_FAILED(rc)) { return false; }
         sLdnStationOpen = true;
@@ -525,24 +420,21 @@ bool ldn_connect_to_index(int index) {
             target->common.bssid.addr[0], target->common.bssid.addr[1], target->common.bssid.addr[2],
             target->common.bssid.addr[3], target->common.bssid.addr[4], target->common.bssid.addr[5]);
 
-    mutexLock(&sLdnIpcMutex);
     Result rc = ldnConnect(&sec, &user, 0, 0, target);
-    mutexUnlock(&sLdnIpcMutex);
     ldn_log("[LDN] ldnConnect: 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
     if (R_FAILED(rc)) { return false; }
 
     sLdnConnected = true;
     sLdnStationOpen = false;
-    ldn_thread_start();
+    if (!ldn_udp_open()) {
+        ldn_log("[LDN] ldn_connect_to_index: udp transport failed to open");
+        ldn_shutdown_impl();
+        return false;
+    }
     return true;
 }
 
 bool ldn_refresh_scan(void) {
-    // Scanning while already connected is pointless (and racy - the
-    // background thread may be mid ldnSendActionFrame/ldnRecvActionFrame on
-    // this session right now) - this is what let the browser panel's
-    // still-polling refresh crash the ldn sysmodule right after a successful
-    // connect. Once connected there's nothing left to discover.
     if (sLdnConnected) { return true; }
 
     if (!sLdnInitialized) {
@@ -552,19 +444,10 @@ bool ldn_refresh_scan(void) {
     sLdnNetworkCount = 0;
     LdnScanFilter filter;
     memset(&filter, 0, sizeof(filter));
-    // Unfiltered, ldnScan() returns every LDN network in range - other
-    // people's unrelated games included, not just ours (this is why the
-    // browser kept finding "4 networks" even with no host of ours running,
-    // and why connecting to the wrong entry failed). -1 here resolves to
-    // this process's own real LocalCommunicationId (the title we're
-    // overridden as, e.g. Smash Ultimate), same as ldnCreateNetwork/
-    // ldnConnect, so this only matches networks hosted by the same game.
     filter.network_id.intent_id.local_communication_id = -1;
     filter.flags = LdnScanFilterFlag_LocalCommunicationId;
 
-    mutexLock(&sLdnIpcMutex);
     Result rc = ldnScan(0, &filter, sLdnNetworkInfo, 4, &sLdnNetworkCount);
-    mutexUnlock(&sLdnIpcMutex);
     ldn_log("[LDN] ldnScan: 0x%x (mod=%04x desc=%04x), networks=%d",
             rc, R_MODULE(rc), R_DESCRIPTION(rc), sLdnNetworkCount);
 
