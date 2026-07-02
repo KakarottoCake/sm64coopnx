@@ -16,3 +16,6 @@ python3 extract_assets.py us
 This regenerates all asset files listed in `assets.json` from your ROM, including the two removed here - the build system already treats extracted assets as untracked/gitignored, so this only needs to be run once per checkout.
 
 Switch build: see `Makefile.nx` (`make -f Makefile.nx`), requires devkitA64/libnx.
+
+## Legal
+This is a fan-made, non-commercial project not affiliated with Nintendo, and distributes no Nintendo assets. See [NOTICE.md](NOTICE.md) for details.
