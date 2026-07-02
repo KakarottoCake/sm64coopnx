@@ -7,6 +7,11 @@ Feel free to report bugs or contribute to the project.
 ## Nintendo Switch Port
 sm64coopNX adds a homebrew Nintendo Switch port (devkitA64/libnx) with native LDN local wireless multiplayer, alongside the existing PC build.
 
+**Status: work in progress.**
+- Offline/solo play is stable.
+- LDN local wireless multiplayer connects and can sync gameplay, but is still unreliable - sessions have been observed lagging and eventually disconnecting, especially when loading into a level. Untested with more than 2 consoles.
+- Direct connect (regular IP-based online multiplayer) on Switch is completely untested.
+
 A few ROM-extracted asset files (`actors/bowser_key/*.rgba16.png`, `sound/sequences_compressed.bin`) that had accidentally been committed upstream were removed from this fork, since they're derived from Nintendo's original ROM data. To restore them (required for a full build), place your own legally-owned Super Mario 64 ROM as `baserom.us.z64` in the repo root and run the project's own extraction tool:
 
 ```
