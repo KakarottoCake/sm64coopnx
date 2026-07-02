@@ -64,6 +64,7 @@ enum PacketType {
     PACKET_MOD_LIST_ENTRY,
     PACKET_MOD_LIST_FILE,
     PACKET_MOD_LIST_DONE,
+    PACKET_MOD_LIST_FILE_BATCH,
 
     PACKET_LUA_SYNC_TABLE_REQUEST,
     PACKET_LUA_SYNC_TABLE,
@@ -353,6 +354,7 @@ void network_send_mod_list(void);
 void network_receive_mod_list(struct Packet* p);
 void network_receive_mod_list_entry(struct Packet* p);
 void network_receive_mod_list_file(struct Packet* p);
+void network_receive_mod_list_file_batch(struct Packet* p);
 void network_receive_mod_list_done(struct Packet* p);
 
 // packet_download.c

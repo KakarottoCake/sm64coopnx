@@ -117,7 +117,15 @@ static void gfx_sdl_init(const char *window_title) {
 
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
     SDL_Init(SDL_INIT_VIDEO);
+#ifndef __SWITCH__
+    // On desktop this just enables background text events (invisible to the
+    // user). switch-sdl2 maps it to actually launching the swkbd applet, so
+    // calling it unconditionally at boot pops up the on-screen keyboard
+    // before any text field exists. djui_inputbox.c already calls
+    // gWindowApi->start_text_input() itself whenever a field gains focus,
+    // which is the only time Switch should ever show it.
     SDL_StartTextInput();
+#endif
 
     if (configWindow.msaa > 0) {
         SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
@@ -138,12 +146,42 @@ static void gfx_sdl_init(const char *window_title) {
     int xpos = (configWindow.x == WAPI_WIN_CENTERPOS) ? SDL_WINDOWPOS_CENTERED : configWindow.x;
     int ypos = (configWindow.y == WAPI_WIN_CENTERPOS) ? SDL_WINDOWPOS_CENTERED : configWindow.y;
 
+#ifdef __SWITCH__
+    // nvnflinger's display layer isn't always immediately available right
+    // after process launch (observed: SDL_CreateWindow intermittently fails
+    // with "Invalid window" / LibnxBinderError_BadValue on a cold boot, but
+    // succeeds on a warm one) - retry a few times with a short delay rather
+    // than failing outright on what's a transient timing issue, not a
+    // logic bug.
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        wnd = SDL_CreateWindow(
+            window_title,
+            xpos, ypos, configWindow.w, configWindow.h,
+            // no window resizing concept on a fixed console display surface;
+            // nvnflinger's buffer queue is tied to a fixed-size layer
+            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN
+        );
+        if (wnd) { ctx = SDL_GL_CreateContext(wnd); }
+
+        FILE* f = fopen("sdmc:/sm64coopdx_gfx.log", "a");
+        if (f) {
+            fprintf(f, "[gfx_sdl_init] attempt=%d w=%d h=%d wnd=%p ctx=%p SDL_GetError=\"%s\"\n",
+                    attempt, configWindow.w, configWindow.h, (void*)wnd, (void*)ctx, SDL_GetError());
+            fclose(f);
+        }
+
+        if (wnd && ctx) { break; }
+        if (wnd) { SDL_DestroyWindow(wnd); wnd = NULL; }
+        SDL_Delay(300);
+    }
+#else
     wnd = SDL_CreateWindow(
         window_title,
         xpos, ypos, configWindow.w, configWindow.h,
         SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
     ctx = SDL_GL_CreateContext(wnd);
+#endif
 
     gfx_sdl_set_vsync(configWindow.vsync);
 

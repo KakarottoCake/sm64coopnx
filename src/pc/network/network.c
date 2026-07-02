@@ -104,6 +104,9 @@ void network_set_system(enum NetworkSystemType nsType) {
 #ifdef COOPNET
         case NS_COOPNET: gNetworkSystem = &gNetworkSystemCoopNet; break;
 #endif
+#ifdef __SWITCH__
+        case NS_LDN:     gNetworkSystem = &gNetworkSystemLdn; break;
+#endif
         default: gNetworkSystem = &gNetworkSystemSocket; LOG_ERROR("Unknown network system: %d", nsType); break;
     }
 }
@@ -146,7 +149,14 @@ bool network_init(enum NetworkType inNetworkType, bool reconnecting) {
 
     // initialize the network system
     gNetworkSentJoin = false;
+#ifdef __SWITCH__
+    extern void nx_checkpoint(const char* label);
+    nx_checkpoint("network_init: before gNetworkSystem->initialize");
+#endif
     int rc = gNetworkSystem->initialize(inNetworkType, reconnecting);
+#ifdef __SWITCH__
+    nx_checkpoint("network_init: gNetworkSystem->initialize returned");
+#endif
     if (!rc && inNetworkType != NT_NONE) {
         LOG_ERROR("failed to initialize network system");
         djui_popup_create(DLANG(NOTIF, DISCONNECT_CLOSED), 2);
@@ -165,11 +175,23 @@ bool network_init(enum NetworkType inNetworkType, bool reconnecting) {
         gCurrSaveFileNum = configHostSaveSlot;
 
         mods_activate(&gLocalMods);
+#ifdef __SWITCH__
+        nx_checkpoint("network_init: mods_activate done");
+#endif
         smlua_init();
+#ifdef __SWITCH__
+        nx_checkpoint("network_init: smlua_init done");
+#endif
 
         dynos_behavior_hook_all_custom_behaviors();
+#ifdef __SWITCH__
+        nx_checkpoint("network_init: dynos_behavior_hook_all_custom_behaviors done");
+#endif
 
         network_player_connected(NPT_LOCAL, 0, configPlayerModel, &configPlayerPalette, configPlayerName, get_local_discord_id());
+#ifdef __SWITCH__
+        nx_checkpoint("network_init: network_player_connected done");
+#endif
         extern u8* gOverrideEeprom;
         gOverrideEeprom = NULL;
 
@@ -179,9 +201,15 @@ bool network_init(enum NetworkType inNetworkType, bool reconnecting) {
         }
 
         djui_chat_box_create();
+#ifdef __SWITCH__
+        nx_checkpoint("network_init: djui_chat_box_create done");
+#endif
     }
 
     configfile_save(configfile_name());
+#ifdef __SWITCH__
+    nx_checkpoint("network_init: configfile_save done");
+#endif
 
 #ifdef DISCORD_SDK
     if (gDiscordInitialized) {
@@ -240,6 +268,7 @@ bool network_allow_unknown_local_index(enum PacketType packetType) {
         || (packetType == PACKET_MOD_LIST_ENTRY)
         || (packetType == PACKET_MOD_LIST_FILE)
         || (packetType == PACKET_MOD_LIST_DONE)
+        || (packetType == PACKET_MOD_LIST_FILE_BATCH)
         || (packetType == PACKET_DOWNLOAD_REQUEST)
         || (packetType == PACKET_DOWNLOAD)
         || (packetType == PACKET_KEEP_ALIVE)
@@ -253,6 +282,11 @@ void network_send_to(u8 localIndex, struct Packet* p) {
         LOG_ERROR("no data to send");
         return;
     }
+#ifdef __SWITCH__
+    extern void nx_packet_log(const char* fmt, ...);
+    nx_packet_log("[TX] network_send_to: requestedLocalIndex=%d packetType=%d p->localIndex=%d gNetworkType=%d",
+                  localIndex, p->buffer[0], p->localIndex, gNetworkType);
+#endif
 
     // set destination
     if (localIndex == PACKET_DESTINATION_SERVER) {
@@ -275,6 +309,9 @@ void network_send_to(u8 localIndex, struct Packet* p) {
     if (gNetworkSystem == NULL) { LOG_ERROR("no network system attached"); return; }
     if (localIndex == 0 && !network_allow_unknown_local_index(p->buffer[0])) {
         LOG_ERROR("\n####################\nsending to myself, packetType: %d\n####################\n", p->packetType);
+#ifdef __SWITCH__
+        nx_packet_log("[TX] network_send_to: REFUSED (sending to myself), packetType=%d", p->packetType);
+#endif
         // SOFT_ASSERT(false); - Crash?
         return;
     }
@@ -351,11 +388,25 @@ void network_send_to(u8 localIndex, struct Packet* p) {
         packet_compress(p, &buffer, &len);
         if (!buffer || len == 0) {
             LOG_ERROR("Failed to compress!");
+#ifdef __SWITCH__
+            nx_packet_log("[TX] network_send_to: packet_compress FAILED, packetType=%d", p->packetType);
+#endif
         } else {
+#ifdef __SWITCH__
+            nx_packet_log("[TX] network_send_to: calling gNetworkSystem->send localIndex=%d len=%u packetType=%d", localIndex, len, p->packetType);
+#endif
             int rc = gNetworkSystem->send(localIndex, p->addr, buffer, len);
+#ifdef __SWITCH__
+            nx_packet_log("[TX] network_send_to: send rc=%d", rc);
+#endif
             if (rc == SOCKET_ERROR) { LOG_ERROR("send error %d", rc); return; }
         }
     }
+#ifdef __SWITCH__
+    else {
+        nx_packet_log("[TX] network_send_to: DROPPED (too many packets), packetType=%d", p->packetType);
+    }
+#endif
     p->sent = true;
 
     network_remember_debug_packet(p->packetType, true);
@@ -413,6 +464,11 @@ void network_send(struct Packet* p) {
 }
 
 void network_receive(u8 localIndex, void* addr, u8* data, u16 dataLength) {
+#ifdef __SWITCH__
+    extern void nx_packet_log(const char* fmt, ...);
+    nx_packet_log("[RX] network_receive: localIndex=%d addr=%p dataLength=%d rawType=%d gNetworkType=%d",
+                  localIndex, addr, dataLength, dataLength > 0 ? data[0] : -1, gNetworkType);
+#endif
 
     // receive packet
     struct Packet p = {
@@ -424,6 +480,9 @@ void network_receive(u8 localIndex, void* addr, u8* data, u16 dataLength) {
     };
     if (!packet_decompress(&p, data, dataLength)) {
         LOG_ERROR("Failed to decompress!");
+#ifdef __SWITCH__
+        nx_packet_log("[RX] network_receive: packet_decompress FAILED");
+#endif
         return;
     }
 
@@ -434,8 +493,15 @@ void network_receive(u8 localIndex, void* addr, u8* data, u16 dataLength) {
     // subtract and check hash
     if (!packet_check_hash(&p)) {
         LOG_ERROR("invalid packet hash!");
+#ifdef __SWITCH__
+        nx_packet_log("[RX] network_receive: packet_check_hash FAILED, packetType=%d", p.buffer[0]);
+#endif
         return;
     }
+
+#ifdef __SWITCH__
+    nx_packet_log("[RX] network_receive: decompressed OK, packetType=%d dataLength=%d", p.buffer[0], p.dataLength);
+#endif
 
     network_remember_debug_packet(p.buffer[0], false);
 
@@ -807,3 +873,69 @@ void network_shutdown(bool sendLeaving, bool exiting, bool popup, bool reconnect
 
     djui_reset_popup_disabled_override();
 }
+
+#ifdef __SWITCH__
+
+// Local Data Network (LDN) ad-hoc wireless multiplayer. Coexists with
+// NS_SOCKET (real internet sockets, see socket.c) as an additional
+// network backend, selected via the LOCAL WIRELESS buttons in
+// djui_panel_host.c and the network picker in djui_panel_ldn_browser.c.
+//
+// The actual libnx Ldn* API calls live in socket/socket_ldn.c, not here:
+// <switch.h>'s u64/s64 typedefs (long) conflict with this project's own
+// PR/ultratypes.h u64/s64 (long long) - same width, but C treats them as
+// distinct types, so the two headers cannot coexist in one translation
+// unit. socket_ldn.c includes only <switch.h> (no project headers) and
+// exposes a plain-C-typed (bool/int/u8/u16/u32/s32, never u64/s64) boundary
+// that this file calls into instead.
+
+// trivial stubs (no libnx calls, so no conflict touching these here)
+static s64 ldn_get_id(UNUSED u8 localIndex) { return 0; }
+static char* ldn_get_id_str(UNUSED u8 localIndex) { return "ldn"; }
+static void ldn_save_id(UNUSED u8 localIndex, UNUSED s64 networkId) {}
+static void ldn_clear_id(UNUSED u8 localIndex) {}
+static void* ldn_dup_addr(UNUSED u8 localIndex) { return NULL; }
+static bool ldn_match_addr(UNUSED void* addr1, UNUSED void* addr2) { return false; }
+static void ldn_get_lobby_id(UNUSED char* destination, UNUSED u32 destLength) {}
+static void ldn_get_lobby_secret(UNUSED char* destination, UNUSED u32 destLength) {}
+
+// implemented in socket_ldn.c (isolated from this project's u64/s64 types)
+bool ldn_initialize_impl(bool isServer);
+void ldn_update_impl(void);
+int ldn_send_impl(u8* data, u16 dataLength);
+void ldn_shutdown_impl(void);
+
+static bool ldn_initialize(enum NetworkType networkType, UNUSED bool reconnecting) {
+    return ldn_initialize_impl(networkType == NT_SERVER);
+}
+
+static void ldn_update(void) {
+    ldn_update_impl();
+}
+
+static int ldn_send(UNUSED u8 localIndex, UNUSED void* addr, u8* data, u16 dataLength) {
+    return ldn_send_impl(data, dataLength);
+}
+
+static void ldn_shutdown(UNUSED bool reconnecting) {
+    ldn_shutdown_impl();
+}
+
+struct NetworkSystem gNetworkSystemLdn = {
+    .initialize       = ldn_initialize,
+    .get_id           = ldn_get_id,
+    .get_id_str       = ldn_get_id_str,
+    .save_id          = ldn_save_id,
+    .clear_id         = ldn_clear_id,
+    .dup_addr         = ldn_dup_addr,
+    .match_addr       = ldn_match_addr,
+    .update           = ldn_update,
+    .send             = ldn_send,
+    .get_lobby_id     = ldn_get_lobby_id,
+    .get_lobby_secret = ldn_get_lobby_secret,
+    .shutdown         = ldn_shutdown,
+    .requireServerBroadcast = false,
+    .name             = "LDN",
+};
+
+#endif // __SWITCH__

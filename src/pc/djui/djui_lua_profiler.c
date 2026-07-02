@@ -1,3 +1,5 @@
+#include <SDL2/SDL.h>
+
 #include "djui_lua_profiler.h"
 
 #include "djui.h"

@@ -16,12 +16,23 @@
 
 static bool hideMessage = false;
 
+#ifdef __SWITCH__
+extern void nx_checkpoint(const char* label);
+#define NX_CKPT(label) nx_checkpoint("djui_panel_do_host: " label)
+#else
+#define NX_CKPT(label)
+#endif
+
 void djui_panel_do_host(bool reconnecting, bool playSound) {
+    NX_CKPT("start");
     stop_demo(NULL);
+    NX_CKPT("stop_demo done");
     djui_panel_shutdown();
+    NX_CKPT("djui_panel_shutdown done");
     extern s16 gCurrSaveFileNum;
     gCurrSaveFileNum = configHostSaveSlot;
     update_all_mario_stars();
+    NX_CKPT("update_all_mario_stars done");
 
 #ifndef COOPNET
     if (configNetworkSystem == NS_COOPNET) { configNetworkSystem = NS_SOCKET; }
@@ -29,18 +40,28 @@ void djui_panel_do_host(bool reconnecting, bool playSound) {
     if (configNetworkSystem == NS_COOPNET && configAmountOfPlayers == 1) { configNetworkSystem = NS_SOCKET; }
     if (configNetworkSystem >= NS_MAX) { configNetworkSystem = NS_MAX; }
     network_set_system(configNetworkSystem);
+    NX_CKPT("network_set_system done");
 
+#ifdef __SWITCH__
+    extern void nx_start_host_frame_logging(void);
+    nx_start_host_frame_logging();
+#endif
     network_init(NT_SERVER, reconnecting);
+    NX_CKPT("network_init done");
     djui_panel_modlist_create(NULL);
+    NX_CKPT("djui_panel_modlist_create done");
     fake_lvl_init_from_save_file();
+    NX_CKPT("fake_lvl_init_from_save_file done");
 
     extern s16 gChangeLevelTransition;
     gChangeLevelTransition = gLevelValues.entryLevel;
 
     if (gMarioState->marioObj) vec3f_copy(gMarioState->marioObj->header.gfx.cameraToObject, gGlobalSoundSource);
     if (playSound) { gDelayedInitSound = CHAR_SOUND_OKEY_DOKEY; }
+    NX_CKPT("before play_transition");
 
     play_transition(WARP_TRANSITION_FADE_INTO_STAR, 0x14, 0x00, 0x00, 0x00);
+    NX_CKPT("play_transition done");
 }
 
 void djui_panel_host_message_do_host(UNUSED struct DjuiBase* caller) {

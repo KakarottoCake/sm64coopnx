@@ -1,3 +1,8 @@
+# Switch (nx) build output
+/build_nx/
+*.nro
+*.nacp
+
 # Object files
 *.o
 *.obj

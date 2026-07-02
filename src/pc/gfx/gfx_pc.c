@@ -291,7 +291,21 @@ static void gfx_generate_cc(struct ColorCombiner *cc) {
     }
 
     color_combiner_update_hash(cc);
+#ifdef __SWITCH__
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) nx_checkpoint("gfx_generate_cc: before gfx_lookup_or_create_shader_program");
+    }
+#endif
     cc->prg = gfx_lookup_or_create_shader_program(cc);
+#ifdef __SWITCH__
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) nx_checkpoint("gfx_generate_cc: gfx_lookup_or_create_shader_program done");
+    }
+#endif
     gfx_cc_print(cc);
 }
 
@@ -309,14 +323,42 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(struct CombineM
         }
     }
 
+#ifdef __SWITCH__
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) nx_checkpoint("gfx_lookup_or_create_color_combiner: no cache hit, before gfx_flush");
+    }
+#endif
     gfx_flush();
+#ifdef __SWITCH__
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) nx_checkpoint("gfx_lookup_or_create_color_combiner: gfx_flush done");
+    }
+#endif
 
     struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_index];
     color_combiner_pool_index = (color_combiner_pool_index + 1) % CC_MAX_SHADERS;
     if (color_combiner_pool_size < CC_MAX_SHADERS) { color_combiner_pool_size++; }
 
     memcpy(&comb->cm, cm, sizeof(struct CombineMode));
+#ifdef __SWITCH__
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) nx_checkpoint("gfx_lookup_or_create_color_combiner: before gfx_generate_cc");
+    }
+#endif
     gfx_generate_cc(comb);
+#ifdef __SWITCH__
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) nx_checkpoint("gfx_lookup_or_create_color_combiner: gfx_generate_cc done");
+    }
+#endif
 
     return prev_combiner = comb;
 }
@@ -767,6 +809,31 @@ static OPTIMIZE_O3 void gfx_local_to_world_space(VEC_OUT Vec3f pos, VEC_OUT Vec3
 static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices, bool luaVertexColor) {
     if (!vertices) { return; }
 
+#ifdef __SWITCH__
+    // rsp.loaded_vertices[MAX_VERTICES + 4] has no bounds checking here or
+    // in gfx_sp_tri1() - an out-of-range dest_index/n_vertices writes past
+    // the end of the (last-member-of-struct) array into whatever static
+    // data follows "rsp" in memory. On PC's generously-padded virtual
+    // memory this rarely faults; on Switch's tighter homebrew heap the
+    // same overrun can walk off into an unmapped page and crash.
+    {
+        void nx_checkpoint(const char* label);
+        extern int gNxDlOpcodeLogRemaining;
+        if (gNxDlOpcodeLogRemaining > 0) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "gfx_sp_vertex: n=%zu dest=%zu (MAX_VERTICES=%d)", n_vertices, dest_index, MAX_VERTICES);
+            nx_checkpoint(buf);
+        }
+        if (dest_index + n_vertices > MAX_VERTICES + 4) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "gfx_sp_vertex: OOB CLAMPED n=%zu dest=%zu exceeds buffer of %d", n_vertices, dest_index, MAX_VERTICES + 4);
+            nx_checkpoint(buf);
+            if (dest_index >= MAX_VERTICES + 4) { return; }
+            n_vertices = (MAX_VERTICES + 4) - dest_index;
+        }
+    }
+#endif
+
     Vec3f globalLightCached[2];
     Vec3f vertexColorCached;
     if ((rsp.geometry_mode & G_LIGHTING) && !(rsp.geometry_mode & G_LIGHT_MAP_EXT)) {
@@ -1065,6 +1132,24 @@ static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, cons
 }
 
 static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
+#ifdef __SWITCH__
+    void nx_checkpoint(const char* label);
+    extern int gNxDlOpcodeLogRemaining;
+    bool nxLogTri = gNxDlOpcodeLogRemaining > 0;
+    {
+        if (nxLogTri) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "gfx_sp_tri1: idx=%u,%u,%u (MAX_VERTICES=%d)", vtx1_idx, vtx2_idx, vtx3_idx, MAX_VERTICES);
+            nx_checkpoint(buf);
+        }
+        if (vtx1_idx >= MAX_VERTICES + 4 || vtx2_idx >= MAX_VERTICES + 4 || vtx3_idx >= MAX_VERTICES + 4) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "gfx_sp_tri1: OOB SKIPPED idx=%u,%u,%u exceeds buffer of %d", vtx1_idx, vtx2_idx, vtx3_idx, MAX_VERTICES + 4);
+            nx_checkpoint(buf);
+            return;
+        }
+    }
+#endif
     struct GfxVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
     struct GfxVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
     struct GfxVertex *v3 = &rsp.loaded_vertices[vtx3_idx];
@@ -1107,6 +1192,9 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
                 break;
         }
     }
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: cull check done");
+#endif
 
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (depth_test != rendering_state.depth_test) {
@@ -1146,6 +1234,9 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         rdp.viewport_or_scissor_changed = false;
         x_adjust_4by3_prev = gfx_current_dimensions.x_adjust_4by3;
     }
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: viewport/scissor done");
+#endif
 
     struct CombineMode* cm = &rdp.combine_mode;
 
@@ -1168,14 +1259,26 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         cm->use_2cycle = false;
     }
 
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: before gfx_lookup_or_create_color_combiner");
+#endif
     struct ColorCombiner *comb = gfx_lookup_or_create_color_combiner(cm);
     cm = &comb->cm;
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: color_combiner lookup done");
+#endif
 
     struct ShaderProgram *prg = comb->prg;
     if (prg != rendering_state.shader_program) {
         gfx_flush();
         gfx_rapi->unload_shader(rendering_state.shader_program);
+#ifdef __SWITCH__
+        if (nxLogTri) nx_checkpoint("gfx_sp_tri1: unload_shader done");
+#endif
         gfx_rapi->load_shader(prg);
+#ifdef __SWITCH__
+        if (nxLogTri) nx_checkpoint("gfx_sp_tri1: load_shader done");
+#endif
         rendering_state.shader_program = prg;
     }
     if (cm->use_alpha != rendering_state.alpha_blend) {
@@ -1186,12 +1289,22 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
     uint8_t num_inputs;
     bool used_textures[2];
     gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
+#ifdef __SWITCH__
+    if (nxLogTri) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "gfx_sp_tri1: shader_get_info done num_inputs=%u tex=%d,%d", num_inputs, used_textures[0], used_textures[1]);
+        nx_checkpoint(buf);
+    }
+#endif
 
     for (int32_t i = 0; i < 2; i++) {
         if (used_textures[i]) {
             if (rdp.textures_changed[i]) {
                 gfx_flush();
                 import_texture(i);
+#ifdef __SWITCH__
+                if (nxLogTri) nx_checkpoint("gfx_sp_tri1: import_texture done");
+#endif
                 rdp.textures_changed[i] = false;
             }
             bool linear_filter = configFiltering && ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT);
@@ -1207,8 +1320,14 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
             }
         }
     }
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: texture loop done");
+#endif
 
     bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: z_is_from_0_to_1 done, entering per-vertex loop");
+#endif
 
     for (int32_t i = 0; i < 3; i++) {
         float z = v_arr[i]->z, w = v_arr[i]->w;
@@ -1334,9 +1453,18 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         buf_vbo[buf_vbo_len++] = color->b / 255.0f;
         buf_vbo[buf_vbo_len++] = color->a / 255.0f;*/
     }
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: per-vertex buf_vbo loop done");
+#endif
     if (++buf_vbo_num_tris == MAX_BUFFERED) {
         gfx_flush();
+#ifdef __SWITCH__
+        if (nxLogTri) nx_checkpoint("gfx_sp_tri1: gfx_flush (MAX_BUFFERED) done");
+#endif
     }
+#ifdef __SWITCH__
+    if (nxLogTri) nx_checkpoint("gfx_sp_tri1: end");
+#endif
 }
 
 static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {
@@ -1807,11 +1935,25 @@ static inline void *seg_addr(uintptr_t w1) {
 #define C0(pos, width) ((cmd->words.w0 >> (pos)) & ((1U << width) - 1))
 #define C1(pos, width) ((cmd->words.w1 >> (pos)) & ((1U << width) - 1))
 
+#ifdef __SWITCH__
+void nx_checkpoint(const char* label);
+int gNxDlOpcodeLogRemaining = 0;
+#endif
+
 static void OPTIMIZE_O3 gfx_run_dl(Gfx* cmd) {
     if (!cmd) { return; }
 
     for (;;) {
         uint32_t opcode = cmd->words.w0 >> 24;
+
+#ifdef __SWITCH__
+        if (gNxDlOpcodeLogRemaining > 0) {
+            gNxDlOpcodeLogRemaining--;
+            char buf[48];
+            snprintf(buf, sizeof(buf), "gfx_run_dl: opcode=0x%02x", opcode);
+            nx_checkpoint(buf);
+        }
+#endif
 
         switch (opcode) {
             // RSP commands:
@@ -1896,8 +2038,16 @@ static void OPTIMIZE_O3 gfx_run_dl(Gfx* cmd) {
                 gfx_sp_tri1(C1(16, 8) / 10, C1(8, 8) / 10, C1(0, 8) / 10);
 #endif
                 break;
-#if defined(F3DEX_GBI) || defined(F3DLP_GBI)
+#if defined(F3DEX_GBI_2) || defined(F3DEX_GBI) || defined(F3DLP_GBI)
             case (uint8_t)G_TRI2:
+                // matches G_TRI1's F3DEX_GBI_2 bit layout: first triangle
+                // packed in w0 (C0), second triangle in w1 (C1). This case
+                // was previously only compiled for the old F3DEX_GBI/
+                // F3DLP_GBI microcode - under F3DEX_GBI_2/2E (this
+                // project's real default), G_TRI2 opcodes from raw ROM
+                // display lists fell through to a silent no-op, leaving
+                // "cmd" un-consumed correctly for the rest of the command,
+                // desyncing every opcode that followed.
                 gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
                 gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
                 break;
@@ -2099,8 +2249,28 @@ void gfx_start_frame(void) {
     gfx_current_dimensions.x_adjust_ratio = (4.0f / 3.0f) / gfx_current_dimensions.aspect_ratio;
 }
 
+#ifdef __SWITCH__
+void nx_checkpoint(const char* label);
+extern bool gNxLogGfxRunOnce;
+#endif
+
 void gfx_run(Gfx *commands) {
+#ifdef __SWITCH__
+    // the loading screen calls gfx_run() many times on its own (and
+    // succeeds every time), so a generic "log the first N calls" counter
+    // gets burned by those before the real in-game render call we actually
+    // care about ever happens. gNxLogGfxRunOnce is instead set by the
+    // caller (produce_interpolation_frames_and_delay's first call, in
+    // pc_main.c) right before the specific send_display_list() call we
+    // want visibility into.
+    bool logFirst = gNxLogGfxRunOnce;
+    gNxLogGfxRunOnce = false;
+    if (logFirst) nx_checkpoint("gfx_run: start");
+#endif
     gfx_sp_reset();
+#ifdef __SWITCH__
+    if (logFirst) nx_checkpoint("gfx_run: gfx_sp_reset done");
+#endif
 
     sHasInverseCameraMatrix = false;
 
@@ -2108,13 +2278,27 @@ void gfx_run(Gfx *commands) {
 
     if (!gfx_wapi->start_frame()) {
         dropped_frame = true;
+#ifdef __SWITCH__
+        if (logFirst) nx_checkpoint("gfx_run: dropped frame (gfx_wapi->start_frame returned false)");
+#endif
         return;
     }
     dropped_frame = false;
+#ifdef __SWITCH__
+    if (logFirst) nx_checkpoint("gfx_run: gfx_wapi->start_frame done");
+#endif
 
     //double t0 = gfx_wapi->get_time();
     gfx_rapi->start_frame();
+#ifdef __SWITCH__
+    if (logFirst) nx_checkpoint("gfx_run: gfx_rapi->start_frame done");
+    extern int gNxDlOpcodeLogRemaining;
+    if (logFirst) gNxDlOpcodeLogRemaining = 400;
+#endif
     gfx_run_dl(commands);
+#ifdef __SWITCH__
+    if (logFirst) nx_checkpoint("gfx_run: gfx_run_dl done");
+#endif
 }
 
 void gfx_end_frame_render(void) {

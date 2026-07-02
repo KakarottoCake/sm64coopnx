@@ -65,18 +65,22 @@ static void djui_panel_host_password_text_change(UNUSED struct DjuiBase* caller)
 
 extern void djui_panel_do_host(bool reconnecting, bool playSound);
 static void djui_panel_host_do_host(struct DjuiBase* caller) {
+#ifndef __SWITCH__
     if (!djui_panel_host_port_valid()) {
         djui_interactable_set_input_focus(&sInputboxPort->base);
         djui_inputbox_select_all(sInputboxPort);
         return;
     }
+#endif
 
     // Doesn't let you host if the player limit is not good
     if (configAmountOfPlayers < 1 || configAmountOfPlayers > MAX_PLAYERS) {
         return;
     }
 
+#ifndef __SWITCH__
     configHostPort = atoi(sInputboxPort->buffer);
+#endif
 
     if (gNetworkType == NT_SERVER) {
         network_rehost_begin();
@@ -88,6 +92,31 @@ static void djui_panel_host_do_host(struct DjuiBase* caller) {
     }
 }
 
+#ifdef __SWITCH__
+extern void djui_panel_ldn_browser_create(struct DjuiBase* caller);
+
+// same handler as the bottom HOST/APPLY button - configNetworkSystem
+// defaults to NS_LDN on Switch (configfile.c), so this just gives hosting
+// a second, more prominent entry point without configuring save
+// slot/settings/mods first
+static void djui_panel_host_ldn_host(struct DjuiBase* caller) {
+    djui_panel_host_do_host(caller);
+}
+
+static void djui_panel_host_ldn_join(struct DjuiBase* caller) {
+    network_set_system(NS_LDN);
+    djui_panel_ldn_browser_create(caller);
+}
+
+// solo play is just hosting an LDN network nobody else joins - reuses the
+// exact same, already-tested host path instead of duplicating the local
+// player/mods/save-file setup that's normally gated on gNetworkType==NT_SERVER
+static void djui_panel_host_play_solo(UNUSED struct DjuiBase* caller) {
+    network_set_system(NS_LDN);
+    djui_panel_do_host(false, true);
+}
+#endif
+
 void djui_panel_host_create(struct DjuiBase* caller) {
     struct DjuiBase* defaultBase = NULL;
     struct DjuiThreePanel* panel = djui_panel_menu_create(
@@ -95,6 +124,12 @@ void djui_panel_host_create(struct DjuiBase* caller) {
         false);
     struct DjuiBase* body = djui_three_panel_get_body(panel);
     {
+#ifdef __SWITCH__
+        djui_button_create(body, "LOCAL WIRELESS - HOST", DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_ldn_host);
+        djui_button_create(body, "LOCAL WIRELESS - JOIN", DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_ldn_join);
+        djui_button_create(body, "PLAY SOLO", DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_play_solo);
+#endif
+
         #ifdef COOPNET
         char* nChoices[] = { DLANG(HOST, DIRECT_CONNECTION), DLANG(HOST, COOPNET) };
         struct DjuiSelectionbox* selectionbox1 = djui_selectionbox_create(body, DLANG(HOST, NETWORK_SYSTEM), nChoices, 2, &configNetworkSystem, djui_panel_host_network_system_change);
@@ -103,6 +138,7 @@ void djui_panel_host_create(struct DjuiBase* caller) {
         }
         #endif
 
+#ifndef __SWITCH__
         struct DjuiRect* rect1 = djui_rect_container_create(body, 32);
         {
             sRectPort = djui_rect_container_create(&rect1->base, 32);
@@ -164,6 +200,7 @@ void djui_panel_host_create(struct DjuiBase* caller) {
             }
 #endif
         }
+#endif // __SWITCH__
 
         struct DjuiRect* rect2 = djui_rect_container_create(body, 32);
         {

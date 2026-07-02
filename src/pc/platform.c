@@ -11,7 +11,7 @@
 #include <shlwapi.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
-#else
+#elif !defined(__SWITCH__)
 #include <unistd.h>
 #endif
 
@@ -287,6 +287,61 @@ const char *sys_exe_path_file(void)
 
 static void sys_fatal_impl(const char *msg) {
     MessageBoxA(NULL, msg, "Fatal error", MB_ICONERROR);
+    fprintf(stderr, "FATAL ERROR:\n%s\n", msg);
+    fflush(stderr);
+    exit(1);
+}
+
+#elif defined(__SWITCH__)
+
+static char sArgv0[SYS_MAX_PATH] = { 0 };
+
+void sys_switch_set_argv0(const char *argv0) {
+    if (argv0 == NULL) { return; }
+    strncpy(sArgv0, argv0, SYS_MAX_PATH - 1);
+}
+
+const char *sys_exe_path_file(void) {
+    // nx-hbloader sets argv[0] to the .nro's sdmc: path (e.g.
+    // "sdmc:/switch/sm64coopdx/sm64coopdx_nx.nro"); newlib's sdmc devoptab
+    // accepts that path directly, no translation needed.
+    return sArgv0;
+}
+
+const char *sys_exe_path_dir(void) {
+    static char path[SYS_MAX_PATH] = { 0 };
+    if ('\0' != path[0]) { return path; }
+
+    const char *exeFilepath = sys_exe_path_file();
+    // real hardware passes a proper "sdmc:/switch/..." argv[0] (forward
+    // slashes), but at least some emulators (observed: Eden/yuzu) instead
+    // pass a host-style Windows path with backslashes - accept whichever
+    // separator actually appears last, rather than hanging on an empty
+    // path when only '/' is checked for.
+    const char *lastSeparator = strrchr(exeFilepath, '/');
+    const char *lastSeparatorAlt = strrchr(exeFilepath, '\\');
+    if (lastSeparatorAlt != NULL && (lastSeparator == NULL || lastSeparatorAlt > lastSeparator)) {
+        lastSeparator = lastSeparatorAlt;
+    }
+    if (lastSeparator != NULL) {
+        size_t count = (size_t)(lastSeparator - exeFilepath);
+        strncpy(path, exeFilepath, count);
+    }
+
+    return path;
+}
+
+const char *sys_resource_path(void) {
+    return sys_exe_path_dir();
+}
+
+const char *sys_user_path(void) {
+    // Everything (config, saves, mods) lives next to the .nro on the SD
+    // card, so the whole install stays self-contained in one folder.
+    return sys_exe_path_dir();
+}
+
+static void sys_fatal_impl(const char *msg) {
     fprintf(stderr, "FATAL ERROR:\n%s\n", msg);
     fflush(stderr);
     exit(1);

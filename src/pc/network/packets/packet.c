@@ -128,6 +128,7 @@ void packet_process(struct Packet* p) {
         case PACKET_MOD_LIST_ENTRY:          network_receive_mod_list_entry(p);          break;
         case PACKET_MOD_LIST_FILE:           network_receive_mod_list_file(p);           break;
         case PACKET_MOD_LIST_DONE:           network_receive_mod_list_done(p);           break;
+        case PACKET_MOD_LIST_FILE_BATCH:      network_receive_mod_list_file_batch(p);      break;
 
         case PACKET_LUA_SYNC_TABLE_REQUEST:  network_receive_lua_sync_table_request(p);  break;
         case PACKET_LUA_SYNC_TABLE:          network_receive_lua_sync_table(p);          break;
@@ -147,6 +148,11 @@ void packet_process(struct Packet* p) {
 
 void packet_receive(struct Packet* p) {
     u8 packetType = (u8)p->buffer[0];
+#ifdef __SWITCH__
+    extern void nx_packet_log(const char* fmt, ...);
+    nx_packet_log("[PKT] packet_receive: packetType=%d localIndex=%d gNetworkType=%d gNetworkServerAddr=%p gNetworkPlayerServer=%p gNetworkStartupTimer=%d",
+                  packetType, p->localIndex, gNetworkType, gNetworkServerAddr, gNetworkPlayerServer, gNetworkStartupTimer);
+#endif
 
     // send an ACK if requested
     network_send_ack(p);
@@ -166,6 +172,9 @@ void packet_receive(struct Packet* p) {
         if (gNetworkPlayerServer != NULL) { fromServer = fromServer || p->localIndex == gNetworkPlayerServer->localIndex; }
         if (fromServer && !gNetworkSystem->match_addr(gNetworkServerAddr, p->addr)) {
             LOG_INFO("refusing packet from unknown server");
+#ifdef __SWITCH__
+            nx_packet_log("[PKT] packet_receive: REFUSED unknown server, packetType=%d", packetType);
+#endif
             return;
         }
     }
@@ -174,6 +183,9 @@ void packet_receive(struct Packet* p) {
     if (gNetworkType == NT_SERVER && p->localIndex == UNKNOWN_LOCAL_INDEX && !network_allow_unknown_local_index(packetType)) {
         if (gNetworkStartupTimer > 0) {
             LOG_INFO("refusing packet from unknown player on startup, packetType: %d", packetType);
+#ifdef __SWITCH__
+            nx_packet_log("[PKT] packet_receive: REFUSED unknown player on startup, packetType=%d startupTimer=%d", packetType, gNetworkStartupTimer);
+#endif
             return;
         }
         if (packetType != PACKET_PLAYER) {
@@ -181,8 +193,14 @@ void packet_receive(struct Packet* p) {
             network_send_kick(0, EKT_CLOSE_CONNECTION);
         }
         LOG_INFO("refusing packet from unknown player, packetType: %d", packetType);
+#ifdef __SWITCH__
+        nx_packet_log("[PKT] packet_receive: REFUSED unknown player, packetType=%d", packetType);
+#endif
         return;
     }
+#ifdef __SWITCH__
+    nx_packet_log("[PKT] packet_receive: PASSED filters, dispatching packetType=%d", packetType);
+#endif
 
     // check if we've already seen this packet
     if (p->localIndex != 0 && p->localIndex != UNKNOWN_LOCAL_INDEX && p->seqId != 0 && gNetworkPlayers[p->localIndex].connected) {

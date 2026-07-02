@@ -1,3 +1,5 @@
+#include <SDL2/SDL.h>
+
 #include "djui.h"
 #include "djui_panel.h"
 #include "djui_panel_menu.h"

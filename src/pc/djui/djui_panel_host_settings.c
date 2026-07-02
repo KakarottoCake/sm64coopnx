@@ -72,8 +72,11 @@ void djui_panel_host_settings_create(struct DjuiBase* caller) {
         djui_checkbox_create(body, DLANG(HOST_SETTINGS, BUBBLE_ON_DEATH), &configBubbleDeath, NULL);
         djui_checkbox_create(body, DLANG(HOST_SETTINGS, NAMETAGS), &configNametags, NULL);
 
+#ifndef __SWITCH__
+        // only meaningful for NS_SOCKET, which Switch never uses (LDN-only)
         struct DjuiCheckbox* chkDevMode = djui_checkbox_create(body, DLANG(HOST_SETTINGS, MOD_DEV_MODE), (configNetworkSystem == NS_SOCKET) ? &configModDevMode : &sFalse, NULL);
         djui_base_set_enabled(&chkDevMode->base, configNetworkSystem == NS_SOCKET);
+#endif
 
         struct DjuiRect* rect1 = djui_rect_container_create(body, 32);
         {

@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 #ifndef _LANGUAGE_C
 # define _LANGUAGE_C
@@ -124,13 +126,40 @@ static void gfx_opengl_load_shader(struct ShaderProgram *new_prg) {
     gfx_opengl_set_texture_uniforms(new_prg, 1);
 }
 
+// Capacity of vs_buf/fs_buf in gfx_lookup_or_create_shader_program(). Was a
+// bare 8192 with zero bounds checking in append_str/append_line/sprintf -
+// the world_geometry post-processing block (hue/saturation/brightness/
+// contrast/exposure/dither/posterize/scanlines) adds enough extra GLSL text
+// that this could silently overflow the stack-allocated buffer. Doubled for
+// headroom; append_str/append_line/append_fmt below now also clamp to this
+// capacity so a future overflow truncates the shader instead of corrupting
+// the stack.
+#define GFX_SHADER_BUF_SIZE 16384
+// stop 1 byte early to always leave room for the null terminator written
+// after generation finishes
+#define GFX_SHADER_BUF_CAP (GFX_SHADER_BUF_SIZE - 1)
+
 static void append_str(char *buf, size_t *len, const char *str) {
-    while (*str != '\0') buf[(*len)++] = *str++;
+    while (*str != '\0' && *len < GFX_SHADER_BUF_CAP) buf[(*len)++] = *str++;
 }
 
 static void append_line(char *buf, size_t *len, const char *str) {
-    while (*str != '\0') buf[(*len)++] = *str++;
-    buf[(*len)++] = '\n';
+    while (*str != '\0' && *len < GFX_SHADER_BUF_CAP) buf[(*len)++] = *str++;
+    if (*len < GFX_SHADER_BUF_CAP) buf[(*len)++] = '\n';
+}
+
+// bounds-safe replacement for the `len += sprintf(buf + len, ...)` pattern
+// used throughout shader source generation - sprintf itself has no
+// awareness of the fixed-size vs_buf/fs_buf capacity
+static void append_fmt(char *buf, size_t *len, const char *fmt, ...) {
+    if (*len >= GFX_SHADER_BUF_CAP) { return; }
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf + *len, GFX_SHADER_BUF_CAP - *len, fmt, args);
+    va_end(args);
+    if (n > 0) {
+        *len += (size_t)n < (GFX_SHADER_BUF_CAP - *len) ? (size_t)n : (GFX_SHADER_BUF_CAP - *len);
+    }
 }
 
 static const char *shader_item_to_str(uint32_t item, bool with_alpha, bool only_alpha, bool inputs_have_alpha, bool hint_single_element) {
@@ -242,7 +271,16 @@ static void append_formula(char *buf, size_t *len, uint8_t* cmd, bool do_single,
     }
 }
 
+#ifdef __SWITCH__
+void nx_checkpoint(const char* label);
+extern int gNxDlOpcodeLogRemaining;
+#endif
+
 static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorCombiner* cc) {
+#ifdef __SWITCH__
+    bool nxLog = gNxDlOpcodeLogRemaining > 0;
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: start");
+#endif
     struct CCFeatures ccf = { 0 };
     gfx_cc_get_features(cc, &ccf);
 
@@ -259,8 +297,8 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     bool opt_dither = cc->cm.use_dither;
 #endif
 
-    char vs_buf[8192];
-    char fs_buf[8192];
+    char vs_buf[GFX_SHADER_BUF_SIZE];
+    char fs_buf[GFX_SHADER_BUF_SIZE];
     size_t vs_len = 0;
     size_t fs_len = 0;
     size_t num_floats = 4;
@@ -274,8 +312,8 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     append_line(vs_buf, &vs_len, "attribute vec4 aVtxPos;");
     for (int t = 0; t < 2; t++) {
         if (ccf.used_textures[t]) {
-            vs_len += sprintf(vs_buf + vs_len, "attribute vec2 aTexCoord%d;\n", t);
-            vs_len += sprintf(vs_buf + vs_len, "varying vec2 vTexCoord%d;\n", t);
+            append_fmt(vs_buf, &vs_len, "attribute vec2 aTexCoord%d;\n", t);
+            append_fmt(vs_buf, &vs_len, "varying vec2 vTexCoord%d;\n", t);
             num_floats += 2;
         }
     }
@@ -290,14 +328,14 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
         num_floats += 2;
     }
     for (int i = 0; i < ccf.num_inputs; i++) {
-        vs_len += sprintf(vs_buf + vs_len, "attribute vec%d aInput%d;\n", opt_alpha ? 4 : 3, i + 1);
-        vs_len += sprintf(vs_buf + vs_len, "varying vec%d vInput%d;\n", opt_alpha ? 4 : 3, i + 1);
+        append_fmt(vs_buf, &vs_len, "attribute vec%d aInput%d;\n", opt_alpha ? 4 : 3, i + 1);
+        append_fmt(vs_buf, &vs_len, "varying vec%d vInput%d;\n", opt_alpha ? 4 : 3, i + 1);
         num_floats += opt_alpha ? 4 : 3;
     }
     append_line(vs_buf, &vs_len, "void main() {");
     for (int t = 0; t < 2; t++) {
         if (ccf.used_textures[t]) {
-            vs_len += sprintf(vs_buf + vs_len, "vTexCoord%d = aTexCoord%d;\n", t, t);
+            append_fmt(vs_buf, &vs_len, "vTexCoord%d = aTexCoord%d;\n", t, t);
         }
     }
     if (opt_fog) {
@@ -307,7 +345,7 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
         append_line(vs_buf, &vs_len, "vLightMap = aLightMap;");
     }
     for (int i = 0; i < ccf.num_inputs; i++) {
-        vs_len += sprintf(vs_buf + vs_len, "vInput%d = aInput%d;\n", i + 1, i + 1);
+        append_fmt(vs_buf, &vs_len, "vInput%d = aInput%d;\n", i + 1, i + 1);
     }
     append_line(vs_buf, &vs_len, "gl_Position = aVtxPos;");
     append_line(vs_buf, &vs_len, "}");
@@ -322,7 +360,7 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
 
     for (int t = 0; t < 2; t++) {
         if (ccf.used_textures[t]) {
-            fs_len += sprintf(fs_buf + fs_len, "varying vec2 vTexCoord%d;\n", t);
+            append_fmt(fs_buf, &fs_len, "varying vec2 vTexCoord%d;\n", t);
         }
     }
     if (opt_fog) {
@@ -332,14 +370,14 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
         append_line(fs_buf, &fs_len, "varying vec2 vLightMap;");
     }
     for (int i = 0; i < ccf.num_inputs; i++) {
-        fs_len += sprintf(fs_buf + fs_len, "varying vec%d vInput%d;\n", opt_alpha ? 4 : 3, i + 1);
+        append_fmt(fs_buf, &fs_len, "varying vec%d vInput%d;\n", opt_alpha ? 4 : 3, i + 1);
     }
 
     for (int t = 0; t < 2; t++) {
         if (ccf.used_textures[t]) {
-            fs_len += sprintf(fs_buf + fs_len, "uniform sampler2D uTex%d;\n", t);
-            fs_len += sprintf(fs_buf + fs_len, "uniform vec2 uTex%dSize;\n", t);
-            fs_len += sprintf(fs_buf + fs_len, "uniform bool uTex%dFilter;\n", t);
+            append_fmt(fs_buf, &fs_len, "uniform sampler2D uTex%d;\n", t);
+            append_fmt(fs_buf, &fs_len, "uniform vec2 uTex%dSize;\n", t);
+            append_fmt(fs_buf, &fs_len, "uniform bool uTex%dFilter;\n", t);
         }
     }
 
@@ -428,8 +466,8 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     }
 
     if (world_geometry) {
-        fs_len += sprintf(fs_buf + fs_len, "uniform int uShaderFlags[%d];\n", SHADER_FLAG_MAX);
-        fs_len += sprintf(fs_buf + fs_len, "uniform float uShaderFlagValues[%d];\n", SHADER_FLAG_MAX);
+        append_fmt(fs_buf, &fs_len, "uniform int uShaderFlags[%d];\n", SHADER_FLAG_MAX);
+        append_fmt(fs_buf, &fs_len, "uniform float uShaderFlagValues[%d];\n", SHADER_FLAG_MAX);
     }
 
     append_line(fs_buf, &fs_len, "uniform int uFilter;");
@@ -506,7 +544,7 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
 
         // exposure
         append_line(fs_buf, &fs_len, "if (uShaderFlags[4] == 1) {");
-        append_line(fs_buf, &fs_len, "texel.rgb = texel.rgb + (uShaderFlagValues[4] - 2) * texel.rgb + texel.rgb;");
+        append_line(fs_buf, &fs_len, "texel.rgb = texel.rgb + (uShaderFlagValues[4] - 2.0) * texel.rgb + texel.rgb;");
         append_line(fs_buf, &fs_len, "}");
 
         // dithering
@@ -516,7 +554,7 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
 
         // posterization
         append_line(fs_buf, &fs_len, "if (uShaderFlags[6] == 1) {");
-        append_line(fs_buf, &fs_len, "int levels = int(max(1.0, uShaderFlagValues[6]));");
+        append_line(fs_buf, &fs_len, "float levels = max(1.0, uShaderFlagValues[6]);");
         append_line(fs_buf, &fs_len, "texel.rgb = floor(texel.rgb * levels) / levels;");
         append_line(fs_buf, &fs_len, "}");
 
@@ -555,48 +593,132 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     puts(fs_buf);
     puts("End");*/
 
+#ifdef __SWITCH__
+    if (nxLog) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "create_and_load_new_shader: source generated vs_len=%zu fs_len=%zu", vs_len, fs_len);
+        nx_checkpoint(buf);
+    }
+#endif
+
     const GLchar *sources[2] = { vs_buf, fs_buf };
     const GLint lengths[2] = { vs_len, fs_len };
     GLint success;
 
     GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+#ifdef __SWITCH__
+    if (nxLog) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "create_and_load_new_shader: glCreateShader(VERTEX)=%u", vertex_shader);
+        nx_checkpoint(buf);
+    }
+#endif
     glShaderSource(vertex_shader, 1, &sources[0], &lengths[0]);
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: glShaderSource(vertex) done");
+#endif
     glCompileShader(vertex_shader);
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: glCompileShader(vertex) done");
+#endif
     glGetShaderiv(vertex_shader, GL_COMPILE_STATUS, &success);
+#ifdef __SWITCH__
+    if (nxLog) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "create_and_load_new_shader: vertex compile success=%d", success);
+        nx_checkpoint(buf);
+    }
+#endif
     if (!success) {
         GLint max_length = 0;
         glGetShaderiv(vertex_shader, GL_INFO_LOG_LENGTH, &max_length);
         char error_log[1024];
         fprintf(stderr, "Vertex shader compilation failed\n");
-        glGetShaderInfoLog(vertex_shader, max_length, &max_length, &error_log[0]);
+        // pass the buffer's real capacity, not the (possibly larger) full
+        // log length from GL_INFO_LOG_LENGTH - that was a stack overflow
+        // waiting to happen for any error message over 1024 bytes
+        glGetShaderInfoLog(vertex_shader, sizeof(error_log), &max_length, &error_log[0]);
         fprintf(stderr, "%s\n", &error_log[0]);
+#ifdef __SWITCH__
+        if (nxLog) {
+            char buf[1100];
+            snprintf(buf, sizeof(buf), "create_and_load_new_shader: VERTEX COMPILE FAILED: %s", error_log);
+            nx_checkpoint(buf);
+        }
+#endif
         sys_fatal("vertex shader compilation failed (see terminal)");
     }
 
     GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+#ifdef __SWITCH__
+    if (nxLog) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "create_and_load_new_shader: glCreateShader(FRAGMENT)=%u", fragment_shader);
+        nx_checkpoint(buf);
+    }
+#endif
     glShaderSource(fragment_shader, 1, &sources[1], &lengths[1]);
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: glShaderSource(fragment) done");
+#endif
     glCompileShader(fragment_shader);
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: glCompileShader(fragment) done");
+#endif
     glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &success);
+#ifdef __SWITCH__
+    if (nxLog) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "create_and_load_new_shader: fragment compile success=%d", success);
+        nx_checkpoint(buf);
+    }
+#endif
     if (!success) {
         GLint max_length = 0;
         glGetShaderiv(fragment_shader, GL_INFO_LOG_LENGTH, &max_length);
         char error_log[1024];
         fprintf(stderr, "Fragment shader compilation failed\n");
-        glGetShaderInfoLog(fragment_shader, max_length, &max_length, &error_log[0]);
+        // see the matching comment on the vertex shader path above
+        glGetShaderInfoLog(fragment_shader, sizeof(error_log), &max_length, &error_log[0]);
         fprintf(stderr, "%s\n", &error_log[0]);
+#ifdef __SWITCH__
+        if (nxLog) {
+            char buf[1100];
+            snprintf(buf, sizeof(buf), "create_and_load_new_shader: FRAGMENT COMPILE FAILED: %s", error_log);
+            nx_checkpoint(buf);
+        }
+#endif
         sys_fatal("fragment shader compilation failed (see terminal)");
     }
 
     GLuint shader_program = glCreateProgram();
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: glCreateProgram done");
+#endif
     glAttachShader(shader_program, vertex_shader);
     glAttachShader(shader_program, fragment_shader);
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: glAttachShader x2 done");
+#endif
     glLinkProgram(shader_program);
+#ifdef __SWITCH__
+    if (nxLog) {
+        GLint linkSuccess = 0;
+        glGetProgramiv(shader_program, GL_LINK_STATUS, &linkSuccess);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "create_and_load_new_shader: glLinkProgram done linkSuccess=%d", linkSuccess);
+        nx_checkpoint(buf);
+    }
+#endif
 
     size_t cnt = 0;
 
     struct ShaderProgram *prg = &shader_program_pool[shader_program_pool_index];
     shader_program_pool_index = (shader_program_pool_index + 1) % CC_MAX_SHADERS;
     if (shader_program_pool_size < CC_MAX_SHADERS) { shader_program_pool_size++; }
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: pool slot assigned");
+#endif
 
     prg->attrib_locations[cnt] = glGetAttribLocation(shader_program, "aVtxPos");
     prg->attrib_sizes[cnt] = 4;
@@ -677,8 +799,14 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     }
 
     prg->uniform_locations[8] = glGetUniformLocation(shader_program, "uFilter");
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: uniform binding done, calling gfx_opengl_load_shader");
+#endif
 
     gfx_opengl_load_shader(prg);
+#ifdef __SWITCH__
+    if (nxLog) nx_checkpoint("create_and_load_new_shader: gfx_opengl_load_shader done, returning");
+#endif
 
     return prg;
 }
@@ -827,7 +955,19 @@ static void gfx_opengl_init(void) {
     int vmajor = 0;
     int vminor = 0;
     bool is_es = false;
-    if (!gl_get_version(&vmajor, &vminor, &is_es) || !gl_version_is_supported(vmajor, vminor, is_es)) {
+    bool gotVersion = gl_get_version(&vmajor, &vminor, &is_es);
+#ifdef __SWITCH__
+    {
+        FILE* f = fopen("sdmc:/sm64coopdx_gfx.log", "a");
+        if (f) {
+            const char* rawVersion = (const char*)glGetString(GL_VERSION);
+            fprintf(f, "[gfx_opengl_init] gotVersion=%d major=%d minor=%d is_es=%d raw=\"%s\"\n",
+                    gotVersion, vmajor, vminor, is_es, rawVersion ? rawVersion : "(null)");
+            fclose(f);
+        }
+    }
+#endif
+    if (!gotVersion || !gl_version_is_supported(vmajor, vminor, is_es)) {
         sys_fatal("OpenGL 2.1+ is required.\nReported version: %s%d.%d", is_es ? "ES" : "", vmajor, vminor);
     }
 
@@ -835,10 +975,15 @@ static void gfx_opengl_init(void) {
 
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
 
+#ifndef USE_GLES
+    // GLES2 has no core VAOs (only via the GL_OES_vertex_array_object
+    // extension); this path is already runtime-gated to !is_es, so guarding
+    // it at compile time too changes nothing for desktop GL.
     if (vmajor >= 3 && !is_es) {
         glGenVertexArrays(1, &opengl_vao);
         glBindVertexArray(opengl_vao);
     }
+#endif
 
     glDepthFunc(GL_LEQUAL);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

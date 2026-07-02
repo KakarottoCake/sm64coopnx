@@ -36,8 +36,16 @@ static char sJoinRequestPlayerName[MAX_CONFIG_STRING];
 static char sJoinRequestDiscordId[64];
 bool gCurrentlyJoining = false;
 
+#ifdef __SWITCH__
+extern void nx_packet_log(const char* fmt, ...);
+#define JOIN_LOG(...) nx_packet_log("[JOIN] " __VA_ARGS__)
+#else
+#define JOIN_LOG(...)
+#endif
+
 void network_send_join_request(void) {
     SOFT_ASSERT(gNetworkType == NT_CLIENT);
+    JOIN_LOG("network_send_join_request: start, gNetworkType=%d gNetworkPlayerServer=%p", gNetworkType, gNetworkPlayerServer);
 
     gNetworkSentJoin = true;
     gOverrideEeprom = eeprom;
@@ -54,11 +62,13 @@ void network_send_join_request(void) {
 
     network_send_to((gNetworkPlayerServer != NULL) ? gNetworkPlayerServer->localIndex : 0, &p);
     LOG_INFO("sending join request");
+    JOIN_LOG("network_send_join_request: sent PACKET_JOIN_REQUEST");
 }
 
 void network_receive_join_request(struct Packet* p) {
     SOFT_ASSERT(gNetworkType == NT_SERVER);
     LOG_INFO("received join request");
+    JOIN_LOG("network_receive_join_request: called, gNetworkType=%d p->localIndex=%d", gNetworkType, p->localIndex);
 
     if (p->dataLength > 5) {
         char version[MAX_VERSION_LENGTH] = { 0 };
@@ -92,10 +102,12 @@ void network_send_join(struct Packet* joinRequestPacket) {
         }
         if (globalIndex == UNKNOWN_LOCAL_INDEX || connectedCount >= gServerSettings.maxPlayers) {
             network_send_kick(0, EKT_FULL_PARTY);
+            JOIN_LOG("network_send_join: FULL PARTY, kicking. connectedCount=%d maxPlayers=%d", connectedCount, gServerSettings.maxPlayers);
             return;
         }
     }
     LOG_INFO("chose globalIndex: %d", globalIndex);
+    JOIN_LOG("network_send_join: chose globalIndex=%d", globalIndex);
 
     // do connection event
     network_player_connected(NPT_CLIENT, globalIndex, sJoinRequestPlayerModel, &sJoinRequestPlayerPalette, sJoinRequestPlayerName, sJoinRequestDiscordId);
@@ -130,12 +142,14 @@ void network_send_join(struct Packet* joinRequestPacket) {
 
     network_send_to(globalIndex, &p);
     LOG_INFO("sending join packet");
+    JOIN_LOG("network_send_join: sent PACKET_JOIN to globalIndex=%d", globalIndex);
 
     network_send_network_players(globalIndex);
 }
 
 void network_receive_join(struct Packet* p) {
     SOFT_ASSERT(gNetworkType == NT_CLIENT);
+    JOIN_LOG("network_receive_join: called, gNetworkPlayerLocal=%p", gNetworkPlayerLocal);
     if (gNetworkPlayerLocal != NULL) { return; }
     LOG_INFO("received join packet");
     gCurrentlyJoining = true;
@@ -181,6 +195,7 @@ void network_receive_join(struct Packet* p) {
     packet_read(p, &gServerSettings.pvpType, sizeof(u8));
     packet_read(p, eeprom, sizeof(u8) * 512);
 
+    JOIN_LOG("network_receive_join: myGlobalIndex=%d, entering game", myGlobalIndex);
     network_player_connected(NPT_SERVER, 0, 0, &DEFAULT_MARIO_PALETTE, "Player", "0");
     network_player_connected(NPT_LOCAL, myGlobalIndex, configPlayerModel, &configPlayerPalette, configPlayerName, get_local_discord_id());
     djui_chat_box_create();

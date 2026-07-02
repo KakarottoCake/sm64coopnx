@@ -8,7 +8,14 @@ ALIGNED8 const u8 texture_font_jp[] = {
 };
 
 ALIGNED8 const u8 texture_font_jp_aliased[] = {
+#ifdef __SWITCH__
+// IA16 instead of RGBA32 (half the size) - see Makefile.nx for how this is
+// generated. Binding sites (djui_font.c) use G_IM_FMT_IA/G_IM_SIZ_16b to
+// match, under the same #ifdef.
+#include "build/us_pc/textures/custom_font/custom_font_jp_aliased.ia16.inc.c"
+#else
 #include "textures/custom_font/custom_font_jp_aliased.rgba32.inc.c"
+#endif
 };
 
 ALIGNED8 const u8 texture_font_normal[] = {
@@ -58,7 +65,14 @@ const f32 font_title_widths[] = {
 //////////////////////////////////////////////////////////
 
 ALIGNED8 const u8 texture_font_aliased[] = {
+#ifdef __SWITCH__
+// IA16 instead of RGBA32 (half the size) - see Makefile.nx for how this is
+// generated. Binding sites (djui_font.c) use G_IM_FMT_IA/G_IM_SIZ_16b to
+// match, under the same #ifdef.
+#include "build/us_pc/textures/custom_font/custom_font_aliased.ia16.inc.c"
+#else
 #include "textures/custom_font/custom_font_aliased.rgba32.inc.c"
+#endif
 };
 
 const f32 font_aliased_widths[] = {

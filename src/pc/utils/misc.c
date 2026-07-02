@@ -700,7 +700,11 @@ bool can_update_game(void) {
 void update_game(void) {
     const char *updateExecFilePath = get_update_path();
 
-#ifdef _WIN32
+#ifdef __SWITCH__
+    // no external updater process model on NX; nothing to relaunch into
+    (void) updateExecFilePath;
+    return;
+#elif defined(_WIN32)
     STARTUPINFOA si = { 0 };
     PROCESS_INFORMATION pi = { 0 };
 

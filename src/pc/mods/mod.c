@@ -153,8 +153,14 @@ void mod_activate(struct Mod* mod) {
     // activate dynos models
     for (int i = 0; i < mod->fileCount; i++) {
         struct ModFile* file = &mod->files[i];
-        file->modifiedTimestamp = fs_sys_get_modified_time(file->cachedPath);
+        // mod_cache_add() is what actually sets file->cachedPath (from
+        // mod->basePath + file->relativePath) when it isn't already set -
+        // reading it beforehand used whatever cachedPath happened to be, which
+        // for a freshly-built Mod (e.g. a Switch/LDN join match that was never
+        // downloaded or cache-primed) is NULL, and passing NULL into a stat()
+        // call crashed hard here on Switch (Data Abort in newlib's FindDevice).
         mod_cache_add(mod, file, false);
+        file->modifiedTimestamp = fs_sys_get_modified_time(file->cachedPath);
 
         // forcefully update md5 hash
         if (gNetworkType == NT_SERVER) {

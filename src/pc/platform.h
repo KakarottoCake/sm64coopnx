@@ -27,6 +27,12 @@ int sys_strcasecmp(const char *s1, const char *s2);
 bool sys_windows_short_path_from_wcs(char *destPath, size_t destSize, const wchar_t *wcsLongPath);
 bool sys_windows_short_path_from_mbs(char* destPath, size_t destSize, const char *mbsLongPath);
 #endif
+#ifdef __SWITCH__
+// nx-hbloader passes the .nro's sdmc: path as argv[0]; pc_main.c stashes it
+// here before anything calls sys_user_path()/sys_exe_path_dir(), so all
+// config/save/mod data lives in the same SD card folder as the .nro.
+void sys_switch_set_argv0(const char *argv0);
+#endif
 const char *sys_user_path(void);
 const char *sys_resource_path(void);
 const char *sys_exe_path_dir(void);

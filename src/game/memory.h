@@ -8,7 +8,19 @@
 #define MEMORY_POOL_LEFT  0
 #define MEMORY_POOL_RIGHT 1
 
+#ifdef __SWITCH__
+// gGfxPools (struct GfxPool[GFX_NUM_POOLS], holding a Gfx buffer[GFX_POOL_SIZE]
+// each) is the single largest static allocation in the binary - at the PC
+// default it alone is ~64MB, which is too large an upfront reservation for
+// some NX homebrew launch paths. Cut to an eighth here (close to vanilla
+// SM64's own size) after a quarter-size cut alone wasn't enough to avoid
+// hbloader crashes during launch; more likely to hit display-list overflow
+// in busy multiplayer scenes than the quarter-size cut would have been -
+// worth re-testing/tuning back up once the basics are confirmed working.
+#define GFX_POOL_SIZE      0x80000  //  512KB (Vanilla: 512kB)
+#else
 #define GFX_POOL_SIZE      0x400000 //  4MB (Vanilla: 512kB)
+#endif
 #define DEFAULT_POOL_SIZE 0x2000000 // 32MB (Vanilla: ~11MB)
 
 struct DynamicPool

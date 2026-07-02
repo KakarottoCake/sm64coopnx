@@ -37,6 +37,9 @@ extern struct MarioState gMarioStates[];
 enum NetworkSystemType {
     NS_SOCKET,
     NS_COOPNET,
+#ifdef __SWITCH__
+    NS_LDN,
+#endif
     NS_MAX,
 };
 
@@ -56,6 +59,21 @@ struct NetworkSystem {
     bool requireServerBroadcast;
     char* name;
 };
+
+#ifdef __SWITCH__
+// Local Data Network (LDN) ad-hoc wireless multiplayer, host-discovery/join
+// flow used by djui_panel_ldn_browser.c and the LDN buttons in
+// djui_panel_host.c. Coexists with NS_SOCKET (real internet sockets still
+// work on NX via libnx's BSD-socket shim) - this is an additional option,
+// not a replacement.
+extern struct NetworkSystem gNetworkSystemLdn;
+bool ldn_connect_to_index(s32 index);
+bool ldn_refresh_scan(void);
+s32 ldn_get_network_count(void);
+const char* ldn_get_network_name(s32 index);
+s32 ldn_get_network_player_count(s32 index);
+s32 ldn_get_network_max_players(s32 index);
+#endif
 
 enum PlayerInteractions {
     PLAYER_INTERACTIONS_NONE,

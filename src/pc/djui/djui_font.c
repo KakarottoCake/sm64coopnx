@@ -169,12 +169,21 @@ static void djui_font_aliased_render_char(const char* c) {
         u32 tx = index % 64;
         u32 ty = index / 64;
         extern ALIGNED8 const Texture texture_font_jp_aliased[];
+#ifdef __SWITCH__
+        // IA16 instead of RGBA32 (half the size) on NX - see bin/custom_font.c
+        djui_gfx_render_texture_tile_font(texture_font_jp_aliased, 1024, 2048, G_IM_FMT_IA, G_IM_SIZ_16b, tx * 16, ty * 32, 16, 32);
+#else
         djui_gfx_render_texture_tile_font(texture_font_jp_aliased, 1024, 2048, G_IM_FMT_RGBA, G_IM_SIZ_32b, tx * 16, ty * 32, 16, 32);
+#endif
     } else {
         u32 tx = index % 32;
         u32 ty = index / 32;
         extern ALIGNED8 const Texture texture_font_aliased[];
+#ifdef __SWITCH__
+        djui_gfx_render_texture_tile_font(texture_font_aliased, 512, 256, G_IM_FMT_IA, G_IM_SIZ_16b, tx * 16, ty * 32, 16, 32);
+#else
         djui_gfx_render_texture_tile_font(texture_font_aliased, 512, 256, G_IM_FMT_RGBA, G_IM_SIZ_32b, tx * 16, ty * 32, 16, 32);
+#endif
     }
 }
 

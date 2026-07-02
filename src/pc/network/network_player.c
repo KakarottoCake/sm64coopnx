@@ -219,12 +219,26 @@ void network_player_update(void) {
             if (!np->connected && i > 0) { continue; }
 
             float elapsed = (clock_elapsed() - np->lastReceived);
+            // LDN action frames have no delivery acknowledgment - the
+            // sysmodule reports "sent" as soon as it hands a frame to the
+            // radio driver, whether or not the other console actually
+            // receives it. Real sessions were observed going fully silent
+            // in one direction for 10+ seconds and then recovering on their
+            // own - the old 15s timeout was killing sessions that would
+            // have kept working if just given more time, instead of
+            // tolerating a temporary radio hiccup like a real connection
+            // should.
+            float playerTimeout = (gNetworkSystem == &gNetworkSystemLdn) ? (NETWORK_PLAYER_TIMEOUT * 8.0f) : NETWORK_PLAYER_TIMEOUT;
 #ifdef DEVELOPMENT
-            if (elapsed > NETWORK_PLAYER_TIMEOUT && (gNetworkSystem != &gNetworkSystemSocket)) {
+            if (elapsed > playerTimeout && (gNetworkSystem != &gNetworkSystemSocket)) {
 #else
-            if (elapsed > NETWORK_PLAYER_TIMEOUT) {
+            if (elapsed > playerTimeout) {
 #endif
                 LOG_INFO("dropping player %d", i);
+#ifdef __SWITCH__
+                extern void nx_packet_log(const char* fmt, ...);
+                nx_packet_log("[TIMEOUT] server dropping player %d: elapsed=%.1f lastReceived=%.1f now=%.1f", i, elapsed, np->lastReceived, clock_elapsed());
+#endif
                 network_player_disconnected(i);
                 continue;
             }
@@ -238,12 +252,20 @@ void network_player_update(void) {
         if (!np->connected) { return; }
         float elapsed = (clock_elapsed() - np->lastReceived);
 
+        // see the matching comment on the server-side timeout above - LDN
+        // gets a much longer grace period since silence doesn't mean the
+        // link is actually dead.
+        float clientTimeout = (gNetworkSystem == &gNetworkSystemLdn) ? (NETWORK_PLAYER_TIMEOUT * 8.0f) : (NETWORK_PLAYER_TIMEOUT * 1.5f);
 #ifdef DEVELOPMENT
-        if (elapsed > NETWORK_PLAYER_TIMEOUT * 1.5f && (gNetworkSystem != &gNetworkSystemSocket)) {
+        if (elapsed > clientTimeout && (gNetworkSystem != &gNetworkSystemSocket)) {
 #else
-        if (elapsed > NETWORK_PLAYER_TIMEOUT * 1.5f) {
+        if (elapsed > clientTimeout) {
 #endif
             LOG_INFO("dropping due to no server connectivity");
+#ifdef __SWITCH__
+            extern void nx_packet_log(const char* fmt, ...);
+            nx_packet_log("[TIMEOUT] client dropping: elapsed=%.1f lastReceived=%.1f now=%.1f", elapsed, np->lastReceived, clock_elapsed());
+#endif
             network_shutdown(false, false, true, false);
         }
 
