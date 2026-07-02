@@ -198,7 +198,7 @@ $(OUTPUT).elf: $(OFILES)
 # suspected as a contributing factor in early boot crashes (LibnxBinder
 # BadValue, raised by hbloader itself before our code even runs).
 $(OUTPUT).nacp:
-	@nacptool --create "sm64coopdx" "Coop Deluxe Team" "1.0.0" $(OUTPUT).nacp
+	@nacptool --create "sm64coopNX" "Coop Deluxe Team" "1.0.0" $(OUTPUT).nacp
 
 $(OUTPUT).nro: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ --icon="$(LIBNX)/default_icon.jpg" --nacp=$(OUTPUT).nacp
