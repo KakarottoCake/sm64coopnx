@@ -87,6 +87,9 @@ sm64config.txt
 !/assets/**/*custom*.bin
 !/assets/**/*custom*/**/*.bin
 
+# Committed assets that are not ROM-extracted (carried by upstream too)
+!/actors/bowser_key/*.png
+
 # visual studio
 build-windows-visual-studio/.vs
 
