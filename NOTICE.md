@@ -4,13 +4,11 @@ sm64coopNX (a fork of sm64coopdx) is a fan-made, non-commercial project built on
 community reverse-engineering (decompilation) of Super Mario 64. It is not affiliated with,
 endorsed by, or sponsored by Nintendo.
 
-## No Nintendo assets are distributed
+## Assets
 
-This repository contains no Nintendo copyrighted assets (ROM data, textures, models, audio,
-etc.). Building the game requires you to supply your own legally-owned Super Mario 64 ROM,
-from which the build process (`extract_assets.py`) extracts the assets needed locally on your
-own machine. Nothing derived from Nintendo's ROM is committed to this repository or
-distributed with it.
+This fork tracks upstream sm64coopdx and carries the same asset set it does; it builds
+without you needing to supply a Super Mario 64 ROM. All trademarks and copyrights for Super
+Mario 64 and related properties belong to Nintendo.
 
 ## No formal license
 
@@ -20,8 +18,6 @@ is not ours to license. This matches how other Super Mario 64 decompilation-base
 (sm64ex, sm64-port, sm64coopdx, and others) are typically distributed: source-available for
 educational, preservation, and interoperability purposes, without granting the redistribution
 or commercial-use rights a formal open-source license would imply.
-
-All trademarks and copyrights for Super Mario 64 and related properties belong to Nintendo.
 
 ## Third-party components
 

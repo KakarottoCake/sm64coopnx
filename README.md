@@ -13,15 +13,7 @@ sm64coopNX adds a homebrew Nintendo Switch port (devkitA64/libnx) with native LD
 - The in-game player name defaults to the Switch profile that launched the app.
 - Direct connect (regular IP-based online multiplayer) on Switch is untested.
 
-A few ROM-extracted asset files (`actors/bowser_key/*.rgba16.png`, `sound/sequences_compressed.bin`) that had accidentally been committed upstream were removed from this fork, since they're derived from Nintendo's original ROM data. To restore them (required for a full build), place your own legally-owned Super Mario 64 ROM as `baserom.us.z64` in the repo root and run the project's own extraction tool:
-
-```
-python3 extract_assets.py us
-```
-
-This regenerates all asset files listed in `assets.json` from your ROM, including the two removed here - the build system already treats extracted assets as untracked/gitignored, so this only needs to be run once per checkout.
-
-Switch build: see `Makefile.nx` (`make -f Makefile.nx`), requires devkitA64/libnx.
+Switch build: see `Makefile.nx` (`make -f Makefile.nx`), requires devkitA64/libnx. Like upstream sm64coopdx, this fork builds without you needing to supply a ROM.
 
 ## Legal
-This is a fan-made, non-commercial project not affiliated with Nintendo, and distributes no Nintendo assets. See [NOTICE.md](NOTICE.md) for details.
+This is a fan-made, non-commercial project not affiliated with Nintendo, built on the community sm64 decompilation just like upstream sm64coopdx. See [NOTICE.md](NOTICE.md) for details.
