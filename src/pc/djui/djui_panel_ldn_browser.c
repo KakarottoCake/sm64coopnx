@@ -43,10 +43,12 @@ static void djui_panel_ldn_connect(struct DjuiBase* caller) {
     network_set_system(NS_LDN);
     network_init(NT_CLIENT, false);
 
-    if (ldn_connect_to_index(index)) {
-        djui_connect_menu_open();
-        network_send_mod_list_request();
-    }
+    // Show the "Joining..." menu immediately, then run the blocking
+    // scan+connect on a worker thread so the render loop keeps going.
+    // network_update() polls ldn_poll_connect() and, on success, sends the
+    // mod-list request that finishes the join (on failure it tears down).
+    djui_connect_menu_open();
+    ldn_begin_connect(index);
 
     sLdnConnecting = false;
 }

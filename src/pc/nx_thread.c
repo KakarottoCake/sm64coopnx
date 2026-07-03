@@ -75,3 +75,29 @@ int nx_get_profile_nickname(char* out, unsigned int outLen) {
     accountExit();
     return ok;
 }
+
+// Opens the Switch software keyboard seeded with `initial` so the user can
+// fully edit (including deleting) the existing field value, instead of the
+// SDL incremental-text path which only ever appends. Writes the accepted
+// string into out (NUL-terminated, up to outLen bytes). Returns 1 if the user
+// accepted the text (empty allowed), 0 if cancelled or on any error (in which
+// case out is left untouched).
+int nx_swkbd_edit(const char* initial, char* out, unsigned int outLen) {
+    if (out == NULL || outLen == 0) { return 0; }
+
+    SwkbdConfig kbd;
+    if (R_FAILED(swkbdCreate(&kbd, 0))) { return 0; }
+    swkbdConfigMakePresetDefault(&kbd);
+    if (initial != NULL) { swkbdConfigSetInitialText(&kbd, initial); }
+
+    char tmp[512];
+    tmp[0] = '\0';
+    Result rc = swkbdShow(&kbd, tmp, sizeof(tmp));
+    swkbdClose(&kbd);
+    if (R_FAILED(rc)) { return 0; }
+
+    unsigned int i = 0;
+    for (; i + 1 < outLen && tmp[i]; i++) { out[i] = tmp[i]; }
+    out[i] = '\0';
+    return 1;
+}

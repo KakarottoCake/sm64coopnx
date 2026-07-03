@@ -103,11 +103,6 @@ static void djui_panel_host_ldn_host(struct DjuiBase* caller) {
     djui_panel_host_do_host(caller);
 }
 
-static void djui_panel_host_ldn_join(struct DjuiBase* caller) {
-    network_set_system(NS_LDN);
-    djui_panel_ldn_browser_create(caller);
-}
-
 // solo play is just hosting an LDN network nobody else joins - reuses the
 // exact same, already-tested host path instead of duplicating the local
 // player/mods/save-file setup that's normally gated on gNetworkType==NT_SERVER
@@ -126,7 +121,6 @@ void djui_panel_host_create(struct DjuiBase* caller) {
     {
 #ifdef __SWITCH__
         djui_button_create(body, "LOCAL WIRELESS - HOST", DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_ldn_host);
-        djui_button_create(body, "LOCAL WIRELESS - JOIN", DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_ldn_join);
         djui_button_create(body, "PLAY SOLO", DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_play_solo);
 #endif
 

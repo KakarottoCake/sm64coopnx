@@ -341,7 +341,23 @@ void djui_inputbox_on_focus_begin(UNUSED struct DjuiBase* base) {
     gDjuiInputHeldShift   = 0;
     gDjuiInputHeldControl = 0;
     gDjuiInputHeldAlt     = 0;
+#ifdef __SWITCH__
+    // On Switch, open the native software keyboard seeded with the current
+    // field text so it can be edited/deleted as a whole (the SDL incremental
+    // path only appends). Commit the result, fire the value-change hook, then
+    // drop focus so the menu cursor works normally again.
+    if (base == NULL) { return; }
+    struct DjuiInputbox* inputbox = (struct DjuiInputbox*)base;
+    extern int nx_swkbd_edit(const char* initial, char* out, unsigned int outLen);
+    char edited[256];
+    if (nx_swkbd_edit(inputbox->buffer, edited, sizeof(edited))) {
+        djui_inputbox_set_text(inputbox, edited);
+        djui_inputbox_on_change(inputbox);
+    }
+    djui_interactable_set_input_focus(NULL);
+#else
     gWindowApi->start_text_input();
+#endif
 }
 
 void djui_inputbox_on_focus_end(UNUSED struct DjuiBase* base) {
