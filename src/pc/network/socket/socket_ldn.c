@@ -478,4 +478,60 @@ int ldn_get_network_max_players(int index) {
     return sLdnNetworkInfo[index].node_count_max;
 }
 
+// --- Async join (single-thread) -------------------------------------------
+// The whole client join - ldnInitialize, ldnOpenStation, ldnScan, ldnConnect -
+// runs here on ONE worker thread so the render loop keeps drawing the
+// "Joining..." menu. Critically, EVERY ldn call must happen on this same
+// thread: splitting them (e.g. opening the station on the main thread via
+// network_init and connecting here) makes ldnConnect fail with 0x82cb. To
+// guarantee that, the LDN client path in network.c makes gNetworkSystem->
+// initialize() a no-op, so ldn_refresh_scan() below is the first ldn call and
+// it happens on this thread. The main thread does no concurrent ldn IPC while
+// this runs because sLdnConnected stays false until connect finishes.
+static Thread sConnectThread;
+static bool sConnectThreadActive = false;
+static int sConnectIndex = -1;
+// 0 = idle, 1 = running, 2 = done ok, 3 = done fail
+static volatile int sConnectState = 0;
+
+static void ldn_connect_worker(void* arg) {
+    (void)arg;
+    // ldn_refresh_scan() runs ldnInitialize + ldnOpenStation (if needed) and
+    // ldnScan; ldn_connect_to_index() then runs ldnConnect - all on this thread.
+    ldn_refresh_scan();
+    bool ok = ldn_connect_to_index(sConnectIndex);
+    sConnectState = ok ? 2 : 3;
+}
+
+// Starts the async join for the given scan index. Returns immediately.
+void ldn_begin_connect(int index) {
+    if (sConnectState == 1) { return; } // already connecting
+    if (sConnectThreadActive) {
+        threadWaitForExit(&sConnectThread);
+        threadClose(&sConnectThread);
+        sConnectThreadActive = false;
+    }
+    sConnectIndex = index;
+    sConnectState = 1;
+    Result rc = threadCreate(&sConnectThread, ldn_connect_worker, NULL, NULL, 128 * 1024, 0x2C, -2);
+    if (R_FAILED(rc)) { sConnectState = 3; return; }
+    rc = threadStart(&sConnectThread);
+    if (R_FAILED(rc)) { threadClose(&sConnectThread); sConnectState = 3; return; }
+    sConnectThreadActive = true;
+}
+
+// Poll from the main thread each frame. Returns 0 while idle/running, 1 once
+// on success, -1 once on failure (then latches back to idle).
+int ldn_poll_connect(void) {
+    int s = sConnectState;
+    if (s != 2 && s != 3) { return 0; }
+    if (sConnectThreadActive) {
+        threadWaitForExit(&sConnectThread);
+        threadClose(&sConnectThread);
+        sConnectThreadActive = false;
+    }
+    sConnectState = 0;
+    return (s == 2) ? 1 : -1;
+}
+
 #endif // __SWITCH__

@@ -19,34 +19,22 @@ static void djui_panel_ldn_connect(struct DjuiBase* caller) {
     s32 index = (s32)(intptr_t)caller->tag;
     LOG_INFO("LDN: connecting to network %d", index);
 
-    // The scan snapshot used for this index may be stale by the time the
-    // player actually presses this button (they may have been sitting on
-    // this menu for a while) - real LDN network state can shift in that
-    // window, and ldnConnect() then fails with ResultNetworkNotFound even
-    // though the network is still there. Re-scan immediately beforehand to
-    // shrink that window down to milliseconds; scan ordering is stable
-    // enough in practice for the same index to still refer to the same
-    // network right after a re-scan.
-    ldn_refresh_scan();
-
-    // Every other join path (djui_panel_join_direct.c, djui_panel_join_lobbies.c,
-    // network.c's reconnect flow) calls network_set_system()+network_init(NT_CLIENT,...)
-    // before requesting the mod list - this sets gNetworkType to NT_CLIENT and
-    // runs setup (network_forget_all_reliable, gServerSettings, etc.) that the
-    // rest of the join flow depends on. Skipping it (as this code used to)
-    // left gNetworkType stuck at NT_NONE, so the mod list exchange completed
-    // over the radio but the game never actually finished joining - stuck on
-    // "Joining..." forever. network_init's own LDN initialize() call is a
-    // no-op here since ldn_connect_to_index() below finishes the job (it only
-    // opens Station mode if not already open).
+    // network_set_system()+network_init(NT_CLIENT,...) sets gNetworkType to
+    // NT_CLIENT and runs the setup (network_forget_all_reliable, gServerSettings,
+    // etc.) the rest of the join depends on. For the LDN client, network_init's
+    // initialize() is deliberately a no-op (see ldn_initialize in network.c) -
+    // all ldn work (init/station/scan/connect) is deferred to the async worker
+    // so it all runs on one thread; splitting it makes ldnConnect fail 0x82cb.
     network_reset_reconnect_and_rehost();
     network_set_system(NS_LDN);
     network_init(NT_CLIENT, false);
 
-    if (ldn_connect_to_index(index)) {
-        djui_connect_menu_open();
-        network_send_mod_list_request();
-    }
+    // Show "Joining..." immediately, then scan+connect on the worker thread so
+    // the render loop keeps going. network_update() polls ldn_poll_connect()
+    // and, on success, sends the mod-list request that finishes the join (on
+    // failure it tears down). The worker re-scans, so no pre-scan is needed here.
+    djui_connect_menu_open();
+    ldn_begin_connect(index);
 
     sLdnConnecting = false;
 }
