@@ -42,6 +42,22 @@
 extern void network_receive(unsigned char localIndex, void* addr, unsigned char* data, unsigned short dataLength);
 extern char configPlayerName[];
 
+// Copy the player name into an LDN user_name buffer keeping only printable
+// ASCII. The Switch profile nickname (now the default player name) can contain
+// multibyte UTF-8 / emoji; truncating that into the fixed 0x20 user_name buffer
+// leaves invalid UTF-8, and the ldn sysmodule rejects ldnConnect/ldnCreateNetwork
+// with 0x82cb. Falls back to "Player" if nothing usable remains.
+static void ldn_fill_user_name(char* dst, unsigned int dstLen) {
+    if (dst == NULL || dstLen == 0) { return; }
+    unsigned int o = 0;
+    for (unsigned int i = 0; configPlayerName[i] != '\0' && o + 1 < dstLen; i++) {
+        unsigned char c = (unsigned char)configPlayerName[i];
+        if (c >= 0x20 && c <= 0x7E) { dst[o++] = (char)c; }
+    }
+    dst[o] = '\0';
+    if (o == 0) { snprintf(dst, dstLen, "Player"); }
+}
+
 static bool sLdnInitialized = false;
 static bool sLdnAccessPointOpen = false;
 static bool sLdnStationOpen = false;
@@ -228,7 +244,7 @@ bool ldn_initialize_impl(bool isServer) {
 
         LdnUserConfig user;
         memset(&user, 0, sizeof(user));
-        snprintf(user.user_name, sizeof(user.user_name), "%s", configPlayerName);
+        ldn_fill_user_name(user.user_name, sizeof(user.user_name));
 
         LdnNetworkConfig cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -411,7 +427,8 @@ bool ldn_connect_to_index(int index) {
 
     LdnUserConfig user;
     memset(&user, 0, sizeof(user));
-    snprintf(user.user_name, sizeof(user.user_name), "%s", configPlayerName);
+    ldn_fill_user_name(user.user_name, sizeof(user.user_name));
+    ldn_log("[LDN] ldn_connect_to_index: user_name='%s'", user.user_name);
 
     LdnNetworkInfo* target = &sLdnNetworkInfo[index];
     ldn_log("[LDN] ldn_connect_to_index: target ssid_len=%d channel=%d link_level=%d node_count=%d/%d version=%d security_mode=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x",
