@@ -630,21 +630,6 @@ void network_update(void) {
         gNetworkStartupTimer--;
     }
 
-#ifdef __SWITCH__
-    // Finish an async LDN join started by djui_panel_ldn_browser.c. The scan +
-    // ldnConnect ran on a worker thread; do the djui/network follow-up here on
-    // the main thread once it completes.
-    if (gNetworkType == NT_CLIENT && gNetworkSystem == &gNetworkSystemLdn) {
-        s32 joinResult = ldn_poll_connect();
-        if (joinResult == 1) {
-            network_send_mod_list_request();
-        } else if (joinResult == -1) {
-            djui_popup_create(DLANG(NOTIF, DISCONNECT_CLOSED), 2);
-            network_shutdown(false, false, false, false);
-        }
-    }
-#endif
-
     network_rehost_update();
     network_reconnect_update();
 
