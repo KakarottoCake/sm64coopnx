@@ -437,9 +437,26 @@ bool ldn_connect_to_index(int index) {
             target->common.bssid.addr[0], target->common.bssid.addr[1], target->common.bssid.addr[2],
             target->common.bssid.addr[3], target->common.bssid.addr[4], target->common.bssid.addr[5]);
 
-    Result rc = ldnConnect(&sec, &user, 0, 0, target);
-    ldn_log("[LDN] ldnConnect: 0x%x (mod=%04x desc=%04x)", rc, R_MODULE(rc), R_DESCRIPTION(rc));
-    if (R_FAILED(rc)) { return false; }
+    // ldnConnect can fail with a transient association error (0x82cb /
+    // 2203-0065) even when the host is present and the params are correct -
+    // real games retry the association for several seconds behind their
+    // "Searching..." spinner. A single attempt is flaky, so retry a handful of
+    // times, re-scanning between tries to keep the target's network info fresh.
+    Result rc = 0;
+    bool connected = false;
+    for (int attempt = 0; attempt < 10 && index < sLdnNetworkCount; attempt++) {
+        target = &sLdnNetworkInfo[index];
+        rc = ldnConnect(&sec, &user, 0, 0, target);
+        ldn_log("[LDN] ldnConnect attempt=%d: 0x%x (mod=%04x desc=%04x)", attempt, rc, R_MODULE(rc), R_DESCRIPTION(rc));
+        if (R_SUCCEEDED(rc)) { connected = true; break; }
+        svcSleepThread(400000000ULL); // 400ms, then refresh + retry
+        LdnScanFilter filter;
+        memset(&filter, 0, sizeof(filter));
+        filter.network_id.intent_id.local_communication_id = -1;
+        filter.flags = LdnScanFilterFlag_LocalCommunicationId;
+        ldnScan(0, &filter, sLdnNetworkInfo, 4, &sLdnNetworkCount);
+    }
+    if (!connected) { return false; }
 
     sLdnConnected = true;
     sLdnStationOpen = false;
