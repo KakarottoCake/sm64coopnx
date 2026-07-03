@@ -232,6 +232,12 @@ static void djui_mod_folder_open(UNUSED struct DjuiBase* caller) {
     open_folder(fs_get_write_path("/mods"));
 }
 
+static void djui_panel_host_mods_apply(UNUSED struct DjuiBase* caller) {
+    // restart the running server with the current mod selection applied
+    network_rehost_begin();
+    djui_panel_menu_back(caller);
+}
+
 void djui_panel_host_mods_create(struct DjuiBase* caller) {
 
     mods_update_selectable();
@@ -270,6 +276,18 @@ void djui_panel_host_mods_create(struct DjuiBase* caller) {
                 struct DjuiButton* button2 = djui_button_right_create(&rect2->base, DLANG(HOST_MODS, OPEN_MOD_FOLDER), DJUI_BUTTON_STYLE_NORMAL, djui_mod_folder_open);
                 djui_base_set_size(&button1->base, 0.485f, 45);
                 djui_base_set_size(&button2->base, 0.485f, 45);
+            }
+        } else if (gNetworkType == NT_SERVER) {
+            // hosting: let the host apply mod toggles by restarting the server
+            // instance (network_rehost_begin re-runs mods_activate). Peers that
+            // don't have the newly-required mods are dropped by the existing
+            // join-time mod-list check when they reconnect.
+            struct DjuiRect* rect1 = djui_rect_container_create(body, 45);
+            {
+                struct DjuiButton* backBtn = djui_button_left_create(&rect1->base, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_menu_back);
+                struct DjuiButton* applyBtn = djui_button_right_create(&rect1->base, DLANG(HOST, APPLY), DJUI_BUTTON_STYLE_NORMAL, djui_panel_host_mods_apply);
+                djui_base_set_size(&backBtn->base, 0.485f, 45);
+                djui_base_set_size(&applyBtn->base, 0.485f, 45);
             }
         } else {
             djui_button_create(body, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_menu_back);
