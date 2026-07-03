@@ -29,6 +29,9 @@ static void djui_panel_ldn_connect(struct DjuiBase* caller) {
     if (ldn_connect_to_index(index)) {
         djui_connect_menu_open();
         network_send_mod_list_request();
+    } else {
+        // Give visible feedback instead of a dead button when ldnConnect fails.
+        djui_popup_create("Could not connect to the host.\nMake sure both are launched via the\nsame game (hold R) and try again.", 3);
     }
 
     sLdnConnecting = false;
