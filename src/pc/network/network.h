@@ -73,10 +73,6 @@ s32 ldn_get_network_count(void);
 const char* ldn_get_network_name(s32 index);
 s32 ldn_get_network_player_count(s32 index);
 s32 ldn_get_network_max_players(s32 index);
-// Single-thread async join: worker runs init+scan+connect, main polls
-// (0 = in progress, 1 = connected, -1 = failed).
-void ldn_begin_connect(s32 index);
-s32 ldn_poll_connect(void);
 #endif
 
 enum PlayerInteractions {

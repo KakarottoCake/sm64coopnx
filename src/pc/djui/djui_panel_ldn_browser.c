@@ -19,22 +19,17 @@ static void djui_panel_ldn_connect(struct DjuiBase* caller) {
     s32 index = (s32)(intptr_t)caller->tag;
     LOG_INFO("LDN: connecting to network %d", index);
 
-    // network_set_system()+network_init(NT_CLIENT,...) sets gNetworkType to
-    // NT_CLIENT and runs the setup (network_forget_all_reliable, gServerSettings,
-    // etc.) the rest of the join depends on. For the LDN client, network_init's
-    // initialize() is deliberately a no-op (see ldn_initialize in network.c) -
-    // all ldn work (init/station/scan/connect) is deferred to the async worker
-    // so it all runs on one thread; splitting it makes ldnConnect fail 0x82cb.
+    // Re-scan right before connecting to shrink the stale-snapshot window.
+    ldn_refresh_scan();
+
     network_reset_reconnect_and_rehost();
     network_set_system(NS_LDN);
     network_init(NT_CLIENT, false);
 
-    // Show "Joining..." immediately, then scan+connect on the worker thread so
-    // the render loop keeps going. network_update() polls ldn_poll_connect()
-    // and, on success, sends the mod-list request that finishes the join (on
-    // failure it tears down). The worker re-scans, so no pre-scan is needed here.
-    djui_connect_menu_open();
-    ldn_begin_connect(index);
+    if (ldn_connect_to_index(index)) {
+        djui_connect_menu_open();
+        network_send_mod_list_request();
+    }
 
     sLdnConnecting = false;
 }

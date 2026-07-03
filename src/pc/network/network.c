@@ -630,21 +630,6 @@ void network_update(void) {
         gNetworkStartupTimer--;
     }
 
-#ifdef __SWITCH__
-    // Finish the single-thread async LDN join started by djui_panel_ldn_browser.c.
-    // The worker ran init+scan+connect; do the djui/network follow-up here on
-    // the main thread once it completes.
-    if (gNetworkType == NT_CLIENT && gNetworkSystem == &gNetworkSystemLdn) {
-        s32 joinResult = ldn_poll_connect();
-        if (joinResult == 1) {
-            network_send_mod_list_request();
-        } else if (joinResult == -1) {
-            djui_popup_create(DLANG(NOTIF, DISCONNECT_CLOSED), 2);
-            network_shutdown(false, false, false, false);
-        }
-    }
-#endif
-
     network_rehost_update();
     network_reconnect_update();
 
@@ -930,14 +915,7 @@ static void* ldn_dup_addr(u8 localIndex) { return ldn_dup_addr_impl(localIndex);
 static bool ldn_match_addr(void* addr1, void* addr2) { return ldn_match_addr_impl(addr1, addr2); }
 
 static bool ldn_initialize(enum NetworkType networkType, UNUSED bool reconnecting) {
-    if (networkType == NT_SERVER) {
-        return ldn_initialize_impl(true);
-    }
-    // Client: defer ALL ldn work (init/station/scan/connect) to the async join
-    // worker (ldn_begin_connect) so every ldn call runs on the same thread.
-    // Opening the station here on the main thread and connecting on the worker
-    // makes ldnConnect fail 0x82cb, so this stays a no-op.
-    return true;
+    return ldn_initialize_impl(networkType == NT_SERVER);
 }
 
 static void ldn_update(void) {
